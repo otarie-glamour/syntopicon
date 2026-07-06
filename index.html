@@ -1,0 +1,28 @@
+<!doctype html>
+<html lang="fr">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Syntopicon</title>
+  <style>
+    html, body { margin: 0; background: #EDEFEA; }
+    #loading { font-family: system-ui, sans-serif; color: #46586B; padding: 40px; font-size: 14px; }
+  </style>
+</head>
+<body>
+  <div id="root"><div id="loading">Ouverture du catalogue...</div></div>
+
+  <!--
+    Bibliothèques d'affichage chargées depuis un CDN, versions figées pour la
+    reproductibilité. Une connexion Internet est nécessaire au chargement de la
+    page pour les récupérer ; vos données, elles, restent dans votre navigateur.
+    Pour un fonctionnement entièrement hors ligne, voir README.md.
+  -->
+  <script crossorigin src="https://unpkg.com/react@18.3.1/umd/react.production.min.js"></script>
+  <script crossorigin src="https://unpkg.com/react-dom@18.3.1/umd/react-dom.production.min.js"></script>
+  <script src="https://unpkg.com/@babel/standalone@7/babel.min.js"></script>
+
+  <!-- Votre code. C'est ce fichier que vous modifiez pour faire évoluer l'outil. -->
+  <script type="text/babel" data-presets="react" src="./app.jsx"></script>
+</body>
+</html>
