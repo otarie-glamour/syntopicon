@@ -1,4 +1,4 @@
-const { useState, useEffect, useRef, useMemo } = React;
+const { useState, useEffect, useMemo } = React;
 
 /*
   Persistance via Supabase (base de données + authentification).
@@ -9,25 +9,31 @@ const { useState, useEffect, useRef, useMemo } = React;
 */
 const sb = window.supabase.createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
 
-/* Charge themes/entries/imported_batches de l'utilisateur connecté depuis Supabase. */
+/* Charge themes/entries (+ leurs thèmes N-N)/imported_batches de l'utilisateur connecté. */
 async function fetchRemoteData(userId) {
-  const [{ data: themes, error: te }, { data: entries, error: ee }, { data: batches, error: be }] =
+  const [{ data: themes, error: te }, { data: entries, error: ee }, { data: links, error: le }, { data: batches, error: be }] =
     await Promise.all([
       sb.from("themes").select("id,name").eq("owner_id", userId).order("name"),
       sb
         .from("entries")
-        .select("id,title,theme_id,source,notes,created_at")
+        .select("id,title,source,notes,created_at")
         .eq("owner_id", userId)
         .order("created_at", { ascending: false }),
+      sb.from("entry_themes").select("entry_id,theme_id").eq("owner_id", userId),
       sb.from("imported_batches").select("id").eq("owner_id", userId),
     ]);
-  if (te || ee || be) throw te || ee || be;
+  if (te || ee || le || be) throw te || ee || le || be;
+  const themeIdsByEntry = {};
+  (links || []).forEach((l) => {
+    if (!themeIdsByEntry[l.entry_id]) themeIdsByEntry[l.entry_id] = [];
+    themeIdsByEntry[l.entry_id].push(l.theme_id);
+  });
   return {
     themes: themes || [],
     entries: (entries || []).map((e) => ({
       id: e.id,
       title: e.title,
-      themeId: e.theme_id,
+      themeIds: themeIdsByEntry[e.id] || [],
       source: e.source || "",
       notes: e.notes || "",
       createdAt: new Date(e.created_at).getTime(),
@@ -36,7 +42,7 @@ async function fetchRemoteData(userId) {
   };
 }
 
-/* Insère en base un lot de thèmes / fiches / identifiants de lots importés. */
+/* Insère en base un lot de thèmes / fiches (+ leurs liaisons) / identifiants de lots importés. */
 async function insertRows(userId, { themes = [], entries = [], batchIds = [] }) {
   if (themes.length) {
     const { error } = await sb
@@ -49,13 +55,20 @@ async function insertRows(userId, { themes = [], entries = [], batchIds = [] }) 
       entries.map((e) => ({
         id: e.id,
         title: e.title,
-        theme_id: e.themeId,
         source: e.source,
         notes: e.notes,
         owner_id: userId,
       }))
     );
     if (error) throw error;
+    const links = [];
+    entries.forEach((e) => {
+      (e.themeIds || []).forEach((themeId) => links.push({ entry_id: e.id, theme_id: themeId, owner_id: userId }));
+    });
+    if (links.length) {
+      const { error: linkError } = await sb.from("entry_themes").insert(links);
+      if (linkError) throw linkError;
+    }
   }
   if (batchIds.length) {
     const { error } = await sb
@@ -67,7 +80,7 @@ async function insertRows(userId, { themes = [], entries = [], batchIds = [] }) 
 
 /*
   SYNTOPICON : espace de travail personnel inspiré du Syntopicon d'Adler.
-  Vue Kanban par thème (propriété de sélection unique), capture rapide,
+  Vue Kanban par thème (une fiche peut appartenir à plusieurs thèmes), capture rapide,
   groupes masqués, analytique des idées. Données enregistrées dans Supabase et
   exportables en JSON. Esthétique : fiches de lecture / catalogue de bibliothèque.
 */
@@ -174,10 +187,11 @@ function mergeImports(base) {
     const existingIds = new Set(d.entries.map((e) => e.id));
     for (const e of batch.entries) {
       if (existingIds.has(e.id)) continue;
+      const linkedThemeId = themeIdByName[e.theme.toLowerCase()] || null;
       const entry = {
         id: e.id,
         title: e.title,
-        themeId: themeIdByName[e.theme.toLowerCase()] || null,
+        themeIds: linkedThemeId ? [linkedThemeId] : [],
         source: e.source,
         notes: e.notes,
         createdAt: Date.now(),
@@ -258,7 +272,6 @@ function Syntopicon() {
   const [dragId, setDragId] = useState(null);
   const [dragOver, setDragOver] = useState(null);
   const [search, setSearch] = useState("");
-  const fileInputRef = useRef(null);
 
   /* ---------- authentification ---------- */
   useEffect(() => {
@@ -311,7 +324,7 @@ function Syntopicon() {
     const e = {
       id: uid("en"),
       title: entry.title.trim(),
-      themeId: entry.themeId || null,
+      themeIds: entry.themeIds || [],
       source: (entry.source || "").trim(),
       notes: (entry.notes || "").trim(),
       createdAt: Date.now(),
@@ -320,7 +333,6 @@ function Syntopicon() {
     const { error } = await sb.from("entries").insert({
       id: e.id,
       title: e.title,
-      theme_id: e.themeId,
       source: e.source,
       notes: e.notes,
       owner_id: session.user.id,
@@ -328,6 +340,15 @@ function Syntopicon() {
     if (error) {
       setSaveState("error");
       return;
+    }
+    if (e.themeIds.length) {
+      const { error: linkError } = await sb
+        .from("entry_themes")
+        .insert(e.themeIds.map((themeId) => ({ entry_id: e.id, theme_id: themeId, owner_id: session.user.id })));
+      if (linkError) {
+        setSaveState("error");
+        return;
+      }
     }
     setData((d) => ({ ...d, entries: [e, ...d.entries] }));
     setSaveState("saved");
@@ -337,13 +358,30 @@ function Syntopicon() {
     setSaveState("saving");
     const dbPatch = {};
     if ("title" in patch) dbPatch.title = patch.title;
-    if ("themeId" in patch) dbPatch.theme_id = patch.themeId;
     if ("source" in patch) dbPatch.source = patch.source;
     if ("notes" in patch) dbPatch.notes = patch.notes;
-    const { error } = await sb.from("entries").update(dbPatch).eq("id", id);
-    if (error) {
-      setSaveState("error");
-      return;
+    if (Object.keys(dbPatch).length) {
+      const { error } = await sb.from("entries").update(dbPatch).eq("id", id);
+      if (error) {
+        setSaveState("error");
+        return;
+      }
+    }
+    if ("themeIds" in patch) {
+      const { error: delError } = await sb.from("entry_themes").delete().eq("entry_id", id);
+      if (delError) {
+        setSaveState("error");
+        return;
+      }
+      if (patch.themeIds.length) {
+        const { error: insError } = await sb
+          .from("entry_themes")
+          .insert(patch.themeIds.map((themeId) => ({ entry_id: id, theme_id: themeId, owner_id: session.user.id })));
+        if (insError) {
+          setSaveState("error");
+          return;
+        }
+      }
     }
     setData((d) => ({ ...d, entries: d.entries.map((e) => (e.id === id ? { ...e, ...patch } : e)) }));
     setSaveState("saved");
@@ -391,7 +429,8 @@ function Syntopicon() {
 
   const deleteTheme = async (id) => {
     setSaveState("saving");
-    // La contrainte "on delete set null" côté base détache déjà les fiches de ce thème.
+    // La contrainte "on delete cascade" côté base détache déjà les fiches de ce thème
+    // (leurs autres appartenances, elles, restent intactes).
     const { error } = await sb.from("themes").delete().eq("id", id);
     if (error) {
       setSaveState("error");
@@ -399,7 +438,7 @@ function Syntopicon() {
     }
     setData((d) => ({
       themes: d.themes.filter((t) => t.id !== id),
-      entries: d.entries.map((e) => (e.themeId === id ? { ...e, themeId: null } : e)),
+      entries: d.entries.map((e) => ({ ...e, themeIds: e.themeIds.filter((tid) => tid !== id) })),
       importedBatches: d.importedBatches,
     }));
     setSaveState("saved");
@@ -412,67 +451,11 @@ function Syntopicon() {
     addEntry({
       title: firstLine.length > 80 ? firstLine.slice(0, 77) + "..." : firstLine,
       notes: t === firstLine ? "" : t,
-      themeId: null,
+      themeIds: [],
     });
     setQuickText("");
     setQuickFlash(true);
     setTimeout(() => setQuickFlash(false), 1500);
-  };
-
-  /* ---------- export / import ---------- */
-  const exportData = () => {
-    if (!data) return;
-    const blob = new Blob([JSON.stringify(data, null, 2)], {
-      type: "application/json",
-    });
-    const url = URL.createObjectURL(blob);
-    const a = document.createElement("a");
-    a.href = url;
-    a.download = "syntopicon.json";
-    document.body.appendChild(a);
-    a.click();
-    document.body.removeChild(a);
-    URL.revokeObjectURL(url);
-  };
-
-  const importData = (e) => {
-    const file = e.target.files && e.target.files[0];
-    if (!file) return;
-    const reader = new FileReader();
-    reader.onload = async () => {
-      let obj;
-      try {
-        obj = JSON.parse(reader.result);
-      } catch (err) {
-        window.alert("Impossible de lire ce fichier JSON.");
-        return;
-      }
-      if (!obj || !Array.isArray(obj.themes) || !Array.isArray(obj.entries)) {
-        window.alert("Fichier invalide : il doit contenir les champs « themes » et « entries ».");
-        return;
-      }
-      const next = {
-        themes: obj.themes,
-        entries: obj.entries,
-        importedBatches: Array.isArray(obj.importedBatches) ? obj.importedBatches : [],
-      };
-      setSaveState("saving");
-      try {
-        const userId = session.user.id;
-        // Remplacement complet : on repart du fichier importé comme nouvelle vérité.
-        await sb.from("entries").delete().eq("owner_id", userId);
-        await sb.from("themes").delete().eq("owner_id", userId);
-        await sb.from("imported_batches").delete().eq("owner_id", userId);
-        await insertRows(userId, { themes: next.themes, entries: next.entries, batchIds: next.importedBatches });
-        setData(next);
-        setSaveState("saved");
-      } catch (err) {
-        window.alert("L'import a échoué : " + (err.message || "erreur inconnue."));
-        setSaveState("error");
-      }
-    };
-    reader.readAsText(file);
-    e.target.value = ""; // autorise le réimport du même fichier
   };
 
   /* ---------- dérivés ---------- */
@@ -493,7 +476,8 @@ function Syntopicon() {
     if (!data) return map;
     data.themes.forEach((t) => (map[t.id] = []));
     filtered.forEach((e) => {
-      if (e.themeId && map[e.themeId]) map[e.themeId].push(e);
+      const ids = (e.themeIds || []).filter((tid) => map[tid]);
+      if (ids.length) ids.forEach((tid) => map[tid].push(e));
       else map.none.push(e);
     });
     return map;
@@ -545,7 +529,11 @@ function Syntopicon() {
   }
 
   const editingEntry = editing ? data.entries.find((e) => e.id === editing) : null;
-  const maxCount = Math.max(1, ...data.themes.map((t) => data.entries.filter((e) => e.themeId === t.id).length), data.entries.filter((e) => !e.themeId).length);
+  const maxCount = Math.max(
+    1,
+    ...data.themes.map((t) => data.entries.filter((e) => e.themeIds.includes(t.id)).length),
+    data.entries.filter((e) => e.themeIds.length === 0).length
+  );
 
   return (
     <div className="syn-root">
@@ -564,22 +552,6 @@ function Syntopicon() {
             {saveState === "error" && "Erreur d'enregistrement, réessayez"}
           </div>
           <div className="syn-header-actions">
-            <button className="syn-btn syn-btn-sm" onClick={exportData}>
-              Exporter le JSON
-            </button>
-            <button
-              className="syn-btn syn-btn-sm"
-              onClick={() => fileInputRef.current && fileInputRef.current.click()}
-            >
-              Importer
-            </button>
-            <input
-              ref={fileInputRef}
-              type="file"
-              accept="application/json,.json"
-              style={{ display: "none" }}
-              onChange={importData}
-            />
             <button className="syn-btn syn-btn-sm" onClick={() => sb.auth.signOut()}>
               Se déconnecter
             </button>
@@ -635,6 +607,7 @@ function Syntopicon() {
               key={t.id}
               theme={t}
               entries={byTheme[t.id]}
+              unlimited={Boolean(search.trim())}
               onOpen={setEditing}
               onRename={renameTheme}
               onDelete={deleteTheme}
@@ -642,7 +615,12 @@ function Syntopicon() {
               onDragOver={(e) => { e.preventDefault(); setDragOver(t.id); }}
               onDragLeave={() => setDragOver(null)}
               onDrop={() => {
-                if (dragId) updateEntry(dragId, { themeId: t.id });
+                if (dragId) {
+                  const dragged = data.entries.find((e) => e.id === dragId);
+                  if (dragged && !dragged.themeIds.includes(t.id)) {
+                    updateEntry(dragId, { themeIds: [...dragged.themeIds, t.id] });
+                  }
+                }
                 setDragId(null); setDragOver(null);
               }}
               onDragStart={setDragId}
@@ -653,13 +631,14 @@ function Syntopicon() {
             <Column
               theme={{ id: "none", name: "Sans thème" }}
               entries={byTheme.none}
+              unlimited={Boolean(search.trim())}
               onOpen={setEditing}
               muted
               dragOver={dragOver === "none"}
               onDragOver={(e) => { e.preventDefault(); setDragOver("none"); }}
               onDragLeave={() => setDragOver(null)}
               onDrop={() => {
-                if (dragId) updateEntry(dragId, { themeId: null });
+                if (dragId) updateEntry(dragId, { themeIds: [] });
                 setDragId(null); setDragOver(null);
               }}
               onDragStart={setDragId}
@@ -713,10 +692,10 @@ function Syntopicon() {
           <div className="syn-ana-block">
             <h3>Répartition par thème</h3>
             {data.themes.map((t) => {
-              const n = data.entries.filter((e) => e.themeId === t.id).length;
+              const n = data.entries.filter((e) => e.themeIds.includes(t.id)).length;
               return <Bar key={t.id} label={t.name} n={n} max={maxCount} />;
             })}
-            <Bar label="Sans thème" n={data.entries.filter((e) => !e.themeId).length} max={maxCount} muted />
+            <Bar label="Sans thème" n={data.entries.filter((e) => e.themeIds.length === 0).length} max={maxCount} muted />
           </div>
           <div className="syn-ana-block">
             <h3>Provenance des idées</h3>
@@ -766,9 +745,15 @@ function Syntopicon() {
 }
 
 /* ---------- Colonne Kanban ---------- */
-function Column({ theme, entries, onOpen, onRename, onDelete, muted, dragOver, onDragOver, onDragLeave, onDrop, onDragStart }) {
+const COLUMN_PAGE_SIZE = 20;
+
+function Column({ theme, entries, unlimited, onOpen, onRename, onDelete, muted, dragOver, onDragOver, onDragLeave, onDrop, onDragStart }) {
   const [renaming, setRenaming] = useState(false);
   const [name, setName] = useState(theme.name);
+  const [visibleCount, setVisibleCount] = useState(COLUMN_PAGE_SIZE);
+
+  const visibleEntries = unlimited ? entries : entries.slice(0, visibleCount);
+  const remaining = entries.length - visibleEntries.length;
 
   return (
     <div
@@ -804,7 +789,7 @@ function Column({ theme, entries, onOpen, onRename, onDelete, muted, dragOver, o
           <button className="syn-x" title="Supprimer le thème (les fiches deviennent sans thème)" onClick={() => onDelete(theme.id)}>×</button>
         )}
       </div>
-      {entries.map((e) => (
+      {visibleEntries.map((e) => (
         <div
           key={e.id}
           className="syn-card"
@@ -817,6 +802,11 @@ function Column({ theme, entries, onOpen, onRename, onDelete, muted, dragOver, o
           {e.notes && <div className="syn-card-notes">{e.notes}</div>}
         </div>
       ))}
+      {remaining > 0 && (
+        <button className="syn-load-more" onClick={() => setVisibleCount(entries.length)}>
+          Charger {remaining} de plus
+        </button>
+      )}
     </div>
   );
 }
@@ -837,13 +827,17 @@ function Bar({ label, n, max, muted }) {
 /* ---------- Modale d'entrée ---------- */
 function EntryModal({ themes, entry, onClose, onSave, onDelete }) {
   const [title, setTitle] = useState(entry ? entry.title : "");
-  const [themeId, setThemeId] = useState(entry ? entry.themeId || "" : "");
+  const [themeIds, setThemeIds] = useState(entry ? entry.themeIds || [] : []);
   const [source, setSource] = useState(entry ? entry.source : "");
   const [notes, setNotes] = useState(entry ? entry.notes : "");
 
+  const toggleTheme = (id) => {
+    setThemeIds((ids) => (ids.includes(id) ? ids.filter((tid) => tid !== id) : [...ids, id]));
+  };
+
   const save = () => {
     if (!title.trim()) return;
-    onSave({ title: title.trim(), themeId: themeId || null, source, notes });
+    onSave({ title: title.trim(), themeIds, source, notes });
   };
 
   return (
@@ -855,15 +849,18 @@ function EntryModal({ themes, entry, onClose, onSave, onDelete }) {
           <span>Titre</span>
           <input autoFocus className="syn-input" value={title} onChange={(e) => setTitle(e.target.value)} placeholder="La lettre de Pascal sur l'art d'écrire court" />
         </label>
-        <label className="syn-field">
-          <span>Thème syntopique</span>
-          <select className="syn-input" value={themeId} onChange={(e) => setThemeId(e.target.value)}>
-            <option value="">Sans thème</option>
+        <div className="syn-field">
+          <span>Thèmes syntopiques (un ou plusieurs)</span>
+          <div className="syn-theme-checks">
+            {themes.length === 0 && <p className="syn-empty-text">Aucun thème créé pour l'instant.</p>}
             {themes.map((t) => (
-              <option key={t.id} value={t.id}>{t.name}</option>
+              <label key={t.id} className="syn-theme-check">
+                <input type="checkbox" checked={themeIds.includes(t.id)} onChange={() => toggleTheme(t.id)} />
+                {t.name}
+              </label>
             ))}
-          </select>
-        </label>
+          </div>
+        </div>
         <label className="syn-field">
           <span>Source (livre, article, cours...)</span>
           <input className="syn-input" value={source} onChange={(e) => setSource(e.target.value)} placeholder="Pascal, Lettres provinciales, XVI" />
@@ -952,6 +949,8 @@ const css = `
 .syn-card-title { font-weight: 500; padding-bottom: 7px; border-bottom: 1px solid var(--filet); margin-bottom: 7px; }
 .syn-card-source { font-family: 'IBM Plex Mono', monospace; font-size: 11px; color: var(--vert); margin-bottom: 4px; }
 .syn-card-notes { font-size: 12.5px; color: var(--encre-2); display: -webkit-box; -webkit-line-clamp: 3; -webkit-box-orient: vertical; overflow: hidden; }
+.syn-load-more { display: block; width: 100%; border: 1px dashed var(--ligne); background: none; color: var(--encre-2); font: inherit; font-size: 12.5px; padding: 8px; border-radius: 4px; cursor: pointer; margin-top: 2px; margin-bottom: 10px; transition: border-color 0.12s, color 0.12s; }
+.syn-load-more:hover { border-color: var(--vert); color: var(--vert); }
 
 /* ----- groupes masqués ----- */
 .syn-hidden { min-width: 220px; width: 220px; flex-shrink: 0; padding: 6px 8px; }
@@ -997,6 +996,9 @@ const css = `
 .syn-modal-title { font-family: 'Cormorant Garamond', serif; font-weight: 600; font-size: 24px; margin: 0 0 18px; }
 .syn-field { display: block; margin-bottom: 14px; }
 .syn-field > span { display: block; font-size: 12px; font-weight: 600; letter-spacing: 0.02em; color: var(--encre-2); margin-bottom: 5px; }
+.syn-theme-checks { display: flex; flex-wrap: wrap; gap: 6px 14px; max-height: 160px; overflow-y: auto; padding: 10px; border: 1px solid var(--ligne); border-radius: 4px; background: var(--papier); }
+.syn-theme-check { display: flex; align-items: center; gap: 6px; font-size: 13px; cursor: pointer; white-space: nowrap; }
+.syn-theme-check input { cursor: pointer; }
 .syn-modal-actions { display: flex; gap: 10px; align-items: center; margin-top: 20px; }
 .syn-spacer { flex: 1; }
 

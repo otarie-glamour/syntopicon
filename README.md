@@ -27,7 +27,7 @@ Vos notes sont enregistrées dans une base de données **Supabase** (et non plus
 
 Le site est **privé** : personne ne peut consulter ni modifier vos fiches sans se connecter avec votre compte. La connexion se fait une seule fois par appareil (email + mot de passe) — ensuite, votre navigateur reste connecté indéfiniment, jusqu'à ce que vous cliquiez sur « Se déconnecter ».
 
-Le bouton « Exporter le JSON » reste disponible pour garder une copie locale de sauvegarde (fichier `syntopicon.json` téléchargé sur votre ordinateur, pas versionné dans le dépôt) ; « Importer » permet de restaurer entièrement vos données depuis un tel fichier (cela remplace le contenu actuel de la base).
+Pour une sauvegarde manuelle, la table `entries` reste consultable et exportable directement depuis le Table Editor du Dashboard Supabase.
 
 ## Configurer Supabase (à faire une seule fois)
 
