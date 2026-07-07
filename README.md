@@ -17,25 +17,32 @@ Vous n'avez pas besoin d'installer quoi que ce soit de spécial. Ouvrir directem
    ```
 4. Ouvrez votre navigateur à l'adresse `http://localhost:8000`.
 
-Une connexion Internet est nécessaire à l'ouverture de la page (pour charger les bibliothèques d'affichage), mais vos données restent toujours sur votre ordinateur.
+Une connexion Internet est nécessaire (pour charger les bibliothèques d'affichage et parler à Supabase).
 
 Pour arrêter le serveur, retournez dans le Terminal et faites Ctrl+C.
 
 ## Comment vos notes sont sauvegardées
 
-1. **Automatique dans le navigateur.** Tout ce que vous tapez (titres, thèmes, sources, annotations) est enregistré en continu dans votre navigateur. Fermer l'onglet ne perd rien : en rouvrant le site sur le même ordinateur et le même navigateur, tout est retrouvé.
+Vos notes sont enregistrées dans une base de données **Supabase** (et non plus dans le navigateur). Chaque ajout, modification ou suppression est envoyé immédiatement à Supabase ; l'indicateur en haut à droite du site confirme l'enregistrement.
 
-2. **Export en fichier JSON.** Le bouton « Exporter le JSON » télécharge l'intégralité de vos notes dans un fichier `syntopicon.json`. **C'est votre vraie sauvegarde** : le stockage automatique du navigateur peut être effacé (nettoyage du navigateur, changement d'ordinateur, etc.), alors que ce fichier, une fois téléchargé, est en sécurité. Pensez à l'exporter régulièrement. Le bouton « Importer » permet de recharger un tel fichier.
+Le site est **privé** : personne ne peut consulter ni modifier vos fiches sans se connecter avec votre compte. La connexion se fait une seule fois par appareil (email + mot de passe) — ensuite, votre navigateur reste connecté indéfiniment, jusqu'à ce que vous cliquiez sur « Se déconnecter ».
 
-3. **Version publiée sur le dépôt en ligne (GitHub).** Si vous mettez à jour le fichier `syntopicon.json` dans votre dépôt GitHub, cette version sert de point de départ la première fois que vous ouvrez le site sur un nouvel appareil (quand le navigateur n'a encore rien en mémoire).
+Le bouton « Exporter le JSON » reste disponible pour garder une copie locale de sauvegarde (fichier `syntopicon.json` téléchargé sur votre ordinateur, pas versionné dans le dépôt) ; « Importer » permet de restaurer entièrement vos données depuis un tel fichier (cela remplace le contenu actuel de la base).
 
-En résumé : le navigateur retient tout automatiquement au jour le jour, mais la sécurité réelle vient des exports JSON réguliers.
+## Configurer Supabase (à faire une seule fois)
+
+1. **Créer les tables.** Dans le Dashboard Supabase de votre projet, ouvrez SQL Editor > New query, collez le contenu de [`supabase/schema.sql`](supabase/schema.sql) et cliquez sur Run. Cela crée les tables `themes`, `entries`, `imported_batches` et les règles de sécurité (RLS) qui réservent chaque ligne à son propriétaire.
+2. **Créer votre compte (le seul autorisé).** Toujours dans le Dashboard : Authentication > Users > Add user, renseignez votre email et un mot de passe. C'est ce couple email/mot de passe que vous utiliserez pour vous connecter au site.
+3. **Fermer les inscriptions publiques.** Authentication > Sign In / Providers > Email, puis désactivez « Allow new users to sign up » (ou l'équivalent selon la version du Dashboard). Ainsi, même si quelqu'un tombait sur votre site, personne d'autre ne peut créer de compte.
+4. **Récupérer vos clés.** Settings > API : copiez « Project URL » et la clé « anon public » (surtout pas la clé « service_role », qui elle est secrète).
+5. **Renseigner `supabase-config.js`** à la racine du projet avec ces deux valeurs (voir les commentaires dans le fichier). Cette clé "anon" est prévue pour être publique : la vraie protection vient des règles RLS créées à l'étape 1, pas du secret de cette clé.
+6. Lancez le site (voir ci-dessus) et connectez-vous avec le compte créé à l'étape 2. Au tout premier login, vos thèmes et fiches de départ sont automatiquement créés dans Supabase.
 
 ## Mettre le site en ligne (GitHub Pages)
 
-1. Envoyez les fichiers du projet sur votre dépôt GitHub (branche `main`, `site` ou `gh-pages`).
+1. Envoyez les fichiers du projet sur votre dépôt GitHub (branche `main`, `site` ou `gh-pages`), y compris `supabase-config.js` une fois rempli.
 2. Dans le dépôt, allez dans Settings puis Pages.
 3. Sous « Build and deployment », choisissez « Deploy from a branch », sélectionnez votre branche et le dossier racine, puis enregistrez.
 4. Le site sera disponible après quelques instants à l'adresse `https://VOTRE-UTILISATEUR.github.io/VOTRE-DEPOT/`.
 
-**Attention à la confidentialité** : sur un compte GitHub gratuit, un site publié ainsi n'est possible que pour un dépôt public. Tout ce qui s'y trouve, y compris vos notes dans `syntopicon.json`, devient alors lisible par n'importe qui. Si vos notes doivent rester privées, ne les publiez pas sur un dépôt public (il existe des dépôts privés, mais réservés aux comptes payants).
+**Confidentialité** : même si le dépôt GitHub est public (nécessaire pour GitHub Pages gratuit), vos notes ne le sont pas. Le code source de la page est public (comme pour tout site statique), mais les données elles-mêmes vivent dans Supabase et ne sont accessibles qu'après connexion avec le compte créé plus haut, grâce aux règles de sécurité (RLS) définies dans `supabase/schema.sql`.

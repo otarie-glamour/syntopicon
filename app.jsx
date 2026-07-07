@@ -1,49 +1,76 @@
 const { useState, useEffect, useRef, useMemo } = React;
 
 /*
-  Persistance pour hébergement statique (GitHub Pages).
-  Aucun serveur, aucun jeton : les saisies sont enregistrées en continu dans
-  le stockage local du navigateur (localStorage). Les boutons Exporter et
-  Importer permettent de produire et de recharger un fichier syntopicon.json,
-  qui reste votre sauvegarde réelle, transportable et versionnable dans Git.
-  Au tout premier chargement (stockage local vide), l'application tente de lire
-  un syntopicon.json présent dans le dépôt pour servir de corpus de départ.
+  Persistance via Supabase (base de données + authentification).
+  Le site est privé : tant que vous n'êtes pas connecté, aucune donnée n'est
+  chargée ni affichée. Une fois connecté, la session reste enregistrée dans ce
+  navigateur (vous ne vous reconnectez plus sur cet appareil). SUPABASE_URL et
+  SUPABASE_ANON_KEY viennent de supabase-config.js (voir README.md).
 */
-const storage = {
-  async get() {
-    // 1. Copie de travail dans ce navigateur.
-    const local = localStorage.getItem(STORAGE_KEY);
-    if (local) return { value: local };
-    // 2. Corpus publié, versé dans le dépôt (premier chargement seulement).
-    try {
-      const r = await fetch("./syntopicon.json", { cache: "no-store" });
-      if (r.ok) {
-        const obj = await r.json();
-        if (obj && Object.keys(obj).length > 0) return { value: JSON.stringify(obj) };
-      }
-    } catch (e) {
-      // Pas de fichier publié : on partira du modèle de base.
-    }
-    return null;
-  },
-  async set(_key, value) {
-    try {
-      localStorage.setItem(STORAGE_KEY, value);
-      return true;
-    } catch (e) {
-      return false;
-    }
-  },
-};
+const sb = window.supabase.createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
+
+/* Charge themes/entries/imported_batches de l'utilisateur connecté depuis Supabase. */
+async function fetchRemoteData(userId) {
+  const [{ data: themes, error: te }, { data: entries, error: ee }, { data: batches, error: be }] =
+    await Promise.all([
+      sb.from("themes").select("id,name").eq("owner_id", userId).order("name"),
+      sb
+        .from("entries")
+        .select("id,title,theme_id,source,notes,created_at")
+        .eq("owner_id", userId)
+        .order("created_at", { ascending: false }),
+      sb.from("imported_batches").select("id").eq("owner_id", userId),
+    ]);
+  if (te || ee || be) throw te || ee || be;
+  return {
+    themes: themes || [],
+    entries: (entries || []).map((e) => ({
+      id: e.id,
+      title: e.title,
+      themeId: e.theme_id,
+      source: e.source || "",
+      notes: e.notes || "",
+      createdAt: new Date(e.created_at).getTime(),
+    })),
+    importedBatches: (batches || []).map((b) => b.id),
+  };
+}
+
+/* Insère en base un lot de thèmes / fiches / identifiants de lots importés. */
+async function insertRows(userId, { themes = [], entries = [], batchIds = [] }) {
+  if (themes.length) {
+    const { error } = await sb
+      .from("themes")
+      .insert(themes.map((t) => ({ id: t.id, name: t.name, owner_id: userId })));
+    if (error) throw error;
+  }
+  if (entries.length) {
+    const { error } = await sb.from("entries").insert(
+      entries.map((e) => ({
+        id: e.id,
+        title: e.title,
+        theme_id: e.themeId,
+        source: e.source,
+        notes: e.notes,
+        owner_id: userId,
+      }))
+    );
+    if (error) throw error;
+  }
+  if (batchIds.length) {
+    const { error } = await sb
+      .from("imported_batches")
+      .insert(batchIds.map((id) => ({ id, owner_id: userId })));
+    if (error) throw error;
+  }
+}
 
 /*
   SYNTOPICON : espace de travail personnel inspiré du Syntopicon d'Adler.
   Vue Kanban par thème (propriété de sélection unique), capture rapide,
-  groupes masqués, analytique des idées. Données enregistrées en local et
+  groupes masqués, analytique des idées. Données enregistrées dans Supabase et
   exportables en JSON. Esthétique : fiches de lecture / catalogue de bibliothèque.
 */
-
-const STORAGE_KEY = "syntopicon:data";
 
 const SEED = {
   themes: [
@@ -130,6 +157,7 @@ function mergeImports(base) {
     entries: [...(base.entries || [])],
     importedBatches: [...(base.importedBatches || [])],
   };
+  const added = { themes: [], entries: [], batchIds: [] };
   let changed = false;
   for (const batch of IMPORT_BATCHES) {
     if (d.importedBatches.includes(batch.id)) continue;
@@ -140,27 +168,84 @@ function mergeImports(base) {
         const t = { id: uid("th"), name };
         d.themes.push(t);
         themeIdByName[name.toLowerCase()] = t.id;
+        added.themes.push(t);
       }
     }
     const existingIds = new Set(d.entries.map((e) => e.id));
     for (const e of batch.entries) {
       if (existingIds.has(e.id)) continue;
-      d.entries.push({
+      const entry = {
         id: e.id,
         title: e.title,
         themeId: themeIdByName[e.theme.toLowerCase()] || null,
         source: e.source,
         notes: e.notes,
         createdAt: Date.now(),
-      });
+      };
+      d.entries.push(entry);
+      added.entries.push(entry);
     }
     d.importedBatches.push(batch.id);
+    added.batchIds.push(batch.id);
     changed = true;
   }
-  return { data: d, changed };
+  return { data: d, changed, added };
+}
+
+/* ---------- Connexion ---------- */
+function Login() {
+  const [email, setEmail] = useState("");
+  const [password, setPassword] = useState("");
+  const [error, setError] = useState("");
+  const [loading, setLoading] = useState(false);
+
+  const submit = async (ev) => {
+    ev.preventDefault();
+    setLoading(true);
+    setError("");
+    const { error } = await sb.auth.signInWithPassword({ email: email.trim(), password });
+    setLoading(false);
+    if (error) setError("Connexion refusée. Vérifiez votre email et votre mot de passe.");
+  };
+
+  return (
+    <div className="syn-root" style={{ display: "flex", alignItems: "center", justifyContent: "center" }}>
+      <style>{css}</style>
+      <form className="syn-panel" onSubmit={submit} style={{ width: 320 }}>
+        <div className="syn-eyebrow">Accès privé</div>
+        <h1 className="syn-title" style={{ fontSize: 28, marginBottom: 4 }}>Syntopicon</h1>
+        <label className="syn-field" style={{ width: "100%", marginTop: 10 }}>
+          <span>Email</span>
+          <input
+            className="syn-input"
+            type="email"
+            required
+            autoFocus
+            value={email}
+            onChange={(e) => setEmail(e.target.value)}
+          />
+        </label>
+        <label className="syn-field" style={{ width: "100%" }}>
+          <span>Mot de passe</span>
+          <input
+            className="syn-input"
+            type="password"
+            required
+            value={password}
+            onChange={(e) => setPassword(e.target.value)}
+          />
+        </label>
+        {error && <div style={{ color: "var(--filet)", fontSize: 13, marginBottom: 6 }}>{error}</div>}
+        <button className="syn-btn syn-btn-primary" type="submit" disabled={loading}>
+          {loading ? "Connexion..." : "Se connecter"}
+        </button>
+      </form>
+    </div>
+  );
 }
 
 function Syntopicon() {
+  const [session, setSession] = useState(undefined); // undefined = vérification en cours, null = déconnecté
   const [data, setData] = useState(null);
   const [loadError, setLoadError] = useState(false);
   const [saveState, setSaveState] = useState("idle"); // idle | saving | saved | error
@@ -173,49 +258,56 @@ function Syntopicon() {
   const [dragId, setDragId] = useState(null);
   const [dragOver, setDragOver] = useState(null);
   const [search, setSearch] = useState("");
-  const saveTimer = useRef(null);
   const fileInputRef = useRef(null);
 
-  /* ---------- chargement ---------- */
+  /* ---------- authentification ---------- */
   useEffect(() => {
+    sb.auth.getSession().then(({ data }) => setSession(data.session));
+    const { data: listener } = sb.auth.onAuthStateChange((_event, sess) => setSession(sess));
+    return () => listener.subscription.unsubscribe();
+  }, []);
+
+  /* ---------- chargement (une fois connecté) ---------- */
+  useEffect(() => {
+    if (!session) {
+      setData(null);
+      return;
+    }
     (async () => {
-      let base = SEED;
+      const userId = session.user.id;
+      let base;
       try {
-        const res = await storage.get();
-        if (res && res.value) base = JSON.parse(res.value);
+        base = await fetchRemoteData(userId);
       } catch (e) {
-        // clé inexistante lors de la première visite : on initialise
+        console.error("Syntopicon: échec du chargement depuis Supabase :", e);
+        setLoadError(e && e.message ? e.message : true);
+        return;
       }
-      const { data: merged, changed } = mergeImports(base);
+      const isFresh = base.themes.length === 0 && base.entries.length === 0 && base.importedBatches.length === 0;
+      const { data: merged, changed, added } = mergeImports(isFresh ? SEED : base);
       setData(merged);
-      if (changed) {
+      if (isFresh) {
+        setSaveState("saving");
         try {
-          await storage.set(STORAGE_KEY, JSON.stringify(merged));
+          await insertRows(userId, { themes: merged.themes, entries: merged.entries, batchIds: merged.importedBatches });
+          setSaveState("saved");
+        } catch (e) {
+          setSaveState("error");
+        }
+      } else if (changed) {
+        setSaveState("saving");
+        try {
+          await insertRows(userId, added);
           setSaveState("saved");
         } catch (e) {
           setSaveState("error");
         }
       }
     })();
-  }, []);
-
-  /* ---------- persistance ---------- */
-  const persist = (next) => {
-    setData(next);
-    setSaveState("saving");
-    if (saveTimer.current) clearTimeout(saveTimer.current);
-    saveTimer.current = setTimeout(async () => {
-      try {
-        const ok = await storage.set(STORAGE_KEY, JSON.stringify(next));
-        setSaveState(ok ? "saved" : "error");
-      } catch (e) {
-        setSaveState("error");
-      }
-    }, 400);
-  };
+  }, [session]);
 
   /* ---------- mutations ---------- */
-  const addEntry = (entry) => {
+  const addEntry = async (entry) => {
     const e = {
       id: uid("en"),
       title: entry.title.trim(),
@@ -224,44 +316,93 @@ function Syntopicon() {
       notes: (entry.notes || "").trim(),
       createdAt: Date.now(),
     };
-    persist({ ...data, entries: [e, ...data.entries] });
-  };
-
-  const updateEntry = (id, patch) => {
-    persist({
-      ...data,
-      entries: data.entries.map((e) => (e.id === id ? { ...e, ...patch } : e)),
+    setSaveState("saving");
+    const { error } = await sb.from("entries").insert({
+      id: e.id,
+      title: e.title,
+      theme_id: e.themeId,
+      source: e.source,
+      notes: e.notes,
+      owner_id: session.user.id,
     });
+    if (error) {
+      setSaveState("error");
+      return;
+    }
+    setData((d) => ({ ...d, entries: [e, ...d.entries] }));
+    setSaveState("saved");
   };
 
-  const deleteEntry = (id) => {
-    persist({ ...data, entries: data.entries.filter((e) => e.id !== id) });
+  const updateEntry = async (id, patch) => {
+    setSaveState("saving");
+    const dbPatch = {};
+    if ("title" in patch) dbPatch.title = patch.title;
+    if ("themeId" in patch) dbPatch.theme_id = patch.themeId;
+    if ("source" in patch) dbPatch.source = patch.source;
+    if ("notes" in patch) dbPatch.notes = patch.notes;
+    const { error } = await sb.from("entries").update(dbPatch).eq("id", id);
+    if (error) {
+      setSaveState("error");
+      return;
+    }
+    setData((d) => ({ ...d, entries: d.entries.map((e) => (e.id === id ? { ...e, ...patch } : e)) }));
+    setSaveState("saved");
+  };
+
+  const deleteEntry = async (id) => {
+    setSaveState("saving");
+    const { error } = await sb.from("entries").delete().eq("id", id);
+    if (error) {
+      setSaveState("error");
+      return;
+    }
+    setData((d) => ({ ...d, entries: d.entries.filter((e) => e.id !== id) }));
+    setSaveState("saved");
     setEditing(null);
   };
 
-  const addTheme = (name) => {
+  const addTheme = async (name) => {
     const n = name.trim();
     if (!n) return;
     if (data.themes.some((t) => t.name.toLowerCase() === n.toLowerCase())) return;
-    persist({ ...data, themes: [...data.themes, { id: uid("th"), name: n }] });
+    const t = { id: uid("th"), name: n };
+    setSaveState("saving");
+    const { error } = await sb.from("themes").insert({ id: t.id, name: t.name, owner_id: session.user.id });
+    if (error) {
+      setSaveState("error");
+      return;
+    }
+    setData((d) => ({ ...d, themes: [...d.themes, t] }));
+    setSaveState("saved");
   };
 
-  const renameTheme = (id, name) => {
+  const renameTheme = async (id, name) => {
     const n = name.trim();
     if (!n) return;
-    persist({
-      ...data,
-      themes: data.themes.map((t) => (t.id === id ? { ...t, name: n } : t)),
-    });
+    setSaveState("saving");
+    const { error } = await sb.from("themes").update({ name: n }).eq("id", id);
+    if (error) {
+      setSaveState("error");
+      return;
+    }
+    setData((d) => ({ ...d, themes: d.themes.map((t) => (t.id === id ? { ...t, name: n } : t)) }));
+    setSaveState("saved");
   };
 
-  const deleteTheme = (id) => {
-    persist({
-      themes: data.themes.filter((t) => t.id !== id),
-      entries: data.entries.map((e) =>
-        e.themeId === id ? { ...e, themeId: null } : e
-      ),
-    });
+  const deleteTheme = async (id) => {
+    setSaveState("saving");
+    // La contrainte "on delete set null" côté base détache déjà les fiches de ce thème.
+    const { error } = await sb.from("themes").delete().eq("id", id);
+    if (error) {
+      setSaveState("error");
+      return;
+    }
+    setData((d) => ({
+      themes: d.themes.filter((t) => t.id !== id),
+      entries: d.entries.map((e) => (e.themeId === id ? { ...e, themeId: null } : e)),
+      importedBatches: d.importedBatches,
+    }));
+    setSaveState("saved");
   };
 
   const quickCapture = () => {
@@ -298,24 +439,36 @@ function Syntopicon() {
     const file = e.target.files && e.target.files[0];
     if (!file) return;
     const reader = new FileReader();
-    reader.onload = () => {
+    reader.onload = async () => {
+      let obj;
       try {
-        const obj = JSON.parse(reader.result);
-        if (!obj || !Array.isArray(obj.themes) || !Array.isArray(obj.entries)) {
-          window.alert(
-            "Fichier invalide : il doit contenir les champs « themes » et « entries »."
-          );
-          return;
-        }
-        persist({
-          themes: obj.themes,
-          entries: obj.entries,
-          importedBatches: Array.isArray(obj.importedBatches)
-            ? obj.importedBatches
-            : [],
-        });
+        obj = JSON.parse(reader.result);
       } catch (err) {
         window.alert("Impossible de lire ce fichier JSON.");
+        return;
+      }
+      if (!obj || !Array.isArray(obj.themes) || !Array.isArray(obj.entries)) {
+        window.alert("Fichier invalide : il doit contenir les champs « themes » et « entries ».");
+        return;
+      }
+      const next = {
+        themes: obj.themes,
+        entries: obj.entries,
+        importedBatches: Array.isArray(obj.importedBatches) ? obj.importedBatches : [],
+      };
+      setSaveState("saving");
+      try {
+        const userId = session.user.id;
+        // Remplacement complet : on repart du fichier importé comme nouvelle vérité.
+        await sb.from("entries").delete().eq("owner_id", userId);
+        await sb.from("themes").delete().eq("owner_id", userId);
+        await sb.from("imported_batches").delete().eq("owner_id", userId);
+        await insertRows(userId, { themes: next.themes, entries: next.entries, batchIds: next.importedBatches });
+        setData(next);
+        setSaveState("saved");
+      } catch (err) {
+        window.alert("L'import a échoué : " + (err.message || "erreur inconnue."));
+        setSaveState("error");
       }
     };
     reader.readAsText(file);
@@ -360,10 +513,33 @@ function Syntopicon() {
   }, [data]);
 
   /* ---------- rendu ---------- */
-  if (!data) {
+  if (session === undefined) {
     return (
       <div style={{ minHeight: "100vh", display: "flex", alignItems: "center", justifyContent: "center", background: "#EDEFEA", fontFamily: "'IBM Plex Sans', sans-serif", color: "#22303F" }}>
-        {loadError ? "Impossible de charger vos données." : "Ouverture du catalogue..."}
+        Vérification de la connexion...
+      </div>
+    );
+  }
+
+  if (!session) {
+    return <Login />;
+  }
+
+  if (!data) {
+    return (
+      <div style={{ minHeight: "100vh", display: "flex", flexDirection: "column", gap: 8, alignItems: "center", justifyContent: "center", background: "#EDEFEA", fontFamily: "'IBM Plex Sans', sans-serif", color: "#22303F", padding: 24, textAlign: "center" }}>
+        {loadError ? (
+          <>
+            <div>Impossible de charger vos données.</div>
+            {typeof loadError === "string" && (
+              <div style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 12, color: "#C25E5E", maxWidth: 480 }}>
+                {loadError}
+              </div>
+            )}
+          </>
+        ) : (
+          "Ouverture du catalogue..."
+        )}
       </div>
     );
   }
@@ -384,7 +560,7 @@ function Syntopicon() {
         <div className="syn-header-right">
           <div className="syn-save" data-state={saveState}>
             {saveState === "saving" && "Enregistrement..."}
-            {saveState === "saved" && "Enregistré dans ce navigateur"}
+            {saveState === "saved" && "Enregistré dans Supabase"}
             {saveState === "error" && "Erreur d'enregistrement, réessayez"}
           </div>
           <div className="syn-header-actions">
@@ -404,6 +580,9 @@ function Syntopicon() {
               style={{ display: "none" }}
               onChange={importData}
             />
+            <button className="syn-btn syn-btn-sm" onClick={() => sb.auth.signOut()}>
+              Se déconnecter
+            </button>
           </div>
         </div>
       </header>
