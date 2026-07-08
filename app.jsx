@@ -43,6 +43,59 @@ function resolveEntryLinks(entryId, links, entries) {
     .filter(Boolean);
 }
 
+/* ---------- Suggestions de rapprochement (mots-clés communs) ---------- */
+const SUGGESTION_STOPWORDS = new Set([
+  "dans", "avec", "pour", "sont", "être", "avoir", "fait", "faire", "cette",
+  "leur", "leurs", "tout", "tous", "toute", "toutes", "sans", "sous", "vers", "chez",
+  "depuis", "pendant", "notre", "votre", "nos", "vos", "comme", "donc", "mais", "plus",
+  "moins", "très", "bien", "aussi", "alors", "ainsi", "entre", "encore", "quand", "dont",
+  "elle", "elles", "nous", "vous", "ils", "cela", "ceci", "quel", "quelle", "quels",
+  "quelles", "peut", "peuvent", "était", "étaient", "sera", "seront", "autre", "autres",
+]);
+
+/* Mots significatifs (4+ lettres, hors mots vides) d'un texte, en minuscules. */
+function extractKeywords(text) {
+  const words = (text || "").toLowerCase().match(/[a-zà-öø-ÿ]{4,}/g) || [];
+  return new Set(words.filter((w) => !SUGGESTION_STOPWORDS.has(w)));
+}
+
+/* Ordonne une paire d'identifiants de fiches de façon stable (pour la clé de dismissal). */
+function pairKey(id1, id2) {
+  return id1 < id2 ? [id1, id2] : [id2, id1];
+}
+
+/* Calcule des suggestions de liens entre fiches non déjà liées, à partir des
+   mots-clés communs à leur titre et leurs notes. */
+function computeSuggestions(entries, links, dismissedSuggestions, limit) {
+  const withKeywords = entries
+    .map((e) => ({ entry: e, keywords: new Set([...extractKeywords(e.title), ...extractKeywords(e.notes)]) }))
+    .filter((x) => x.keywords.size > 0);
+
+  const linkedPairs = new Set();
+  links.forEach((l) => {
+    linkedPairs.add(l.fromId + "|" + l.toId);
+    linkedPairs.add(l.toId + "|" + l.fromId);
+  });
+  const dismissedPairs = new Set(dismissedSuggestions.map((d) => d.aId + "|" + d.bId));
+
+  const results = [];
+  for (let i = 0; i < withKeywords.length; i++) {
+    for (let j = i + 1; j < withKeywords.length; j++) {
+      const a = withKeywords[i];
+      const b = withKeywords[j];
+      if (linkedPairs.has(a.entry.id + "|" + b.entry.id)) continue;
+      const [x, y] = pairKey(a.entry.id, b.entry.id);
+      if (dismissedPairs.has(x + "|" + y)) continue;
+      const shared = [...a.keywords].filter((k) => b.keywords.has(k));
+      if (shared.length >= 2) {
+        results.push({ a: a.entry, b: b.entry, shared });
+      }
+    }
+  }
+  results.sort((r1, r2) => r2.shared.length - r1.shared.length);
+  return results.slice(0, limit);
+}
+
 /* Charge themes/entries (+ leurs thèmes N-N et leurs liens)/imported_batches de l'utilisateur connecté. */
 async function fetchRemoteData(userId) {
   const [
@@ -51,6 +104,7 @@ async function fetchRemoteData(userId) {
     { data: themeLinks, error: tle },
     { data: entryLinks, error: ele },
     { data: batches, error: be },
+    { data: dismissed, error: de },
   ] = await Promise.all([
     sb.from("themes").select("id,name").eq("owner_id", userId).order("name"),
     sb
@@ -61,8 +115,9 @@ async function fetchRemoteData(userId) {
     sb.from("entry_themes").select("entry_id,theme_id").eq("owner_id", userId),
     sb.from("entry_links").select("id,from_entry_id,to_entry_id,relation").eq("owner_id", userId),
     sb.from("imported_batches").select("id").eq("owner_id", userId),
+    sb.from("dismissed_suggestions").select("entry_a_id,entry_b_id").eq("owner_id", userId),
   ]);
-  if (te || ee || tle || ele || be) throw te || ee || tle || ele || be;
+  if (te || ee || tle || ele || be || de) throw te || ee || tle || ele || be || de;
   const themeIdsByEntry = {};
   (themeLinks || []).forEach((l) => {
     if (!themeIdsByEntry[l.entry_id]) themeIdsByEntry[l.entry_id] = [];
@@ -87,6 +142,7 @@ async function fetchRemoteData(userId) {
       return entry;
     }),
     links: (entryLinks || []).map((l) => ({ id: l.id, fromId: l.from_entry_id, toId: l.to_entry_id, relation: l.relation })),
+    dismissedSuggestions: (dismissed || []).map((d) => ({ aId: d.entry_a_id, bId: d.entry_b_id })),
     importedBatches: (batches || []).map((b) => b.id),
   };
 }
@@ -152,6 +208,7 @@ const SEED = {
   ],
   entries: [],
   links: [],
+  dismissedSuggestions: [],
 };
 
 const uid = (p) => p + "_" + Math.random().toString(36).slice(2, 9);
@@ -226,6 +283,7 @@ function mergeImports(base) {
     themes: [...(base.themes || [])],
     entries: [...(base.entries || [])],
     links: [...(base.links || [])],
+    dismissedSuggestions: [...(base.dismissedSuggestions || [])],
     importedBatches: [...(base.importedBatches || [])],
   };
   const added = { themes: [], entries: [], batchIds: [] };
@@ -336,6 +394,7 @@ function Syntopicon() {
   const [quickText, setQuickText] = useState("");
   const [quickFlash, setQuickFlash] = useState(false);
   const [editing, setEditing] = useState(null); // entry id
+  const [viewing, setViewing] = useState(null); // entry id, visualisation en lecture seule
   const [creating, setCreating] = useState(false);
   const [newTheme, setNewTheme] = useState("");
   const [addingTheme, setAddingTheme] = useState(false);
@@ -546,6 +605,21 @@ function Syntopicon() {
     setSaveState("saved");
   };
 
+  /* Accepter une suggestion crée un lien générique "en lien avec" entre les deux fiches. */
+  const acceptSuggestion = (aId, bId) => addLinks(aId, [bId], "lien");
+
+  const dismissSuggestion = async (aId, bId) => {
+    const [x, y] = pairKey(aId, bId);
+    setSaveState("saving");
+    const { error } = await sb.from("dismissed_suggestions").insert({ entry_a_id: x, entry_b_id: y, owner_id: session.user.id });
+    if (error) {
+      setSaveState("error");
+      return;
+    }
+    setData((d) => ({ ...d, dismissedSuggestions: [...d.dismissedSuggestions, { aId: x, bId: y }] }));
+    setSaveState("saved");
+  };
+
   /* Retourne le thème (existant ou nouvellement créé) pour permettre de le sélectionner aussitôt. */
   const addTheme = async (name) => {
     const n = name.trim();
@@ -639,6 +713,11 @@ function Syntopicon() {
   const activeEntries = useMemo(() => (data ? data.entries.filter((e) => !e.deletedAt) : []), [data]);
   const trashEntries = useMemo(() => (data ? data.entries.filter((e) => e.deletedAt) : []), [data]);
 
+  const suggestions = useMemo(() => {
+    if (!data) return [];
+    return computeSuggestions(activeEntries, data.links, data.dismissedSuggestions, 12);
+  }, [activeEntries, data]);
+
   const filtered = useMemo(() => {
     const q = search.trim().toLowerCase();
     if (!q) return activeEntries;
@@ -702,6 +781,7 @@ function Syntopicon() {
   }
 
   const editingEntry = editing ? activeEntries.find((e) => e.id === editing) : null;
+  const viewingEntry = viewing ? activeEntries.find((e) => e.id === viewing) : null;
   const maxCount = Math.max(
     1,
     ...data.themes.map((t) => activeEntries.filter((e) => e.themeIds.includes(t.id)).length),
@@ -792,6 +872,7 @@ function Syntopicon() {
               linkCounts={linkCounts}
               unlimited={Boolean(search.trim())}
               onOpen={setEditing}
+              onView={setViewing}
               onRename={renameTheme}
               onDelete={deleteTheme}
               dragOver={dragOver === t.id}
@@ -820,6 +901,7 @@ function Syntopicon() {
               linkCounts={linkCounts}
               unlimited={Boolean(search.trim())}
               onOpen={setEditing}
+              onView={setViewing}
               muted
               dragOver={dragOver === "none"}
               onDragOver={(e) => { e.preventDefault(); setDragOver("none"); }}
@@ -867,6 +949,38 @@ function Syntopicon() {
             )}
           </div>
         </div>
+      </section>
+
+      {/* ===== Suggestions de liens ===== */}
+      <section className="syn-suggestions">
+        <div className="syn-section-head">
+          <h2>Rapprochements suggérés</h2>
+          <span className="syn-sub">Fiches partageant des mots-clés, que vous n'avez peut-être pas remarquées</span>
+        </div>
+        {suggestions.length === 0 ? (
+          <p className="syn-empty-text">Aucun rapprochement évident pour l'instant.</p>
+        ) : (
+          <div className="syn-suggestion-grid">
+            {suggestions.map((s) => (
+              <div key={s.a.id + "|" + s.b.id} className="syn-suggestion-card">
+                <div className="syn-suggestion-pair">
+                  <button type="button" className="syn-link-title" onClick={() => setViewing(s.a.id)}>{s.a.title}</button>
+                  <span className="syn-suggestion-arrow">↔</span>
+                  <button type="button" className="syn-link-title" onClick={() => setViewing(s.b.id)}>{s.b.title}</button>
+                </div>
+                <div className="syn-suggestion-keywords">Mots-clés communs : {s.shared.join(", ")}</div>
+                <div className="syn-suggestion-actions">
+                  <button className="syn-btn syn-btn-sm syn-btn-primary" onClick={() => acceptSuggestion(s.a.id, s.b.id)}>
+                    Accepter
+                  </button>
+                  <button className="syn-btn syn-btn-sm" onClick={() => dismissSuggestion(s.a.id, s.b.id)}>
+                    Décliner
+                  </button>
+                </div>
+              </div>
+            ))}
+          </div>
+        )}
       </section>
 
       {/* ===== Analytique ===== */}
@@ -931,8 +1045,19 @@ function Syntopicon() {
           onDelete={() => deleteEntry(editingEntry.id)}
           onAddLinks={addLinks}
           onDeleteLink={deleteLink}
-          onOpenEntry={setEditing}
+          onOpenEntry={(id) => { setEditing(null); setViewing(id); }}
           onAddTheme={addTheme}
+        />
+      )}
+      {viewingEntry && (
+        <ViewModal
+          entry={viewingEntry}
+          allThemes={data.themes}
+          allEntries={activeEntries}
+          links={data.links}
+          onClose={() => setViewing(null)}
+          onOpenEntry={setViewing}
+          onEdit={() => { setViewing(null); setEditing(viewingEntry.id); }}
         />
       )}
       {showTrash && (
@@ -950,7 +1075,7 @@ function Syntopicon() {
 /* ---------- Colonne Kanban ---------- */
 const COLUMN_PAGE_SIZE = 20;
 
-function Column({ theme, entries, allThemes, allEntries, links, linkCounts, unlimited, onOpen, onRename, onDelete, muted, dragOver, onDragOver, onDragLeave, onDrop, onDragStart }) {
+function Column({ theme, entries, allThemes, allEntries, links, linkCounts, unlimited, onOpen, onView, onRename, onDelete, muted, dragOver, onDragOver, onDragLeave, onDrop, onDragStart }) {
   const [renaming, setRenaming] = useState(false);
   const [name, setName] = useState(theme.name);
   const [visibleCount, setVisibleCount] = useState(COLUMN_PAGE_SIZE);
@@ -1039,7 +1164,7 @@ function Column({ theme, entries, allThemes, allEntries, links, linkCounts, unli
                           type="button"
                           className="syn-card-link-btn"
                           title={RELATION_LABELS[l.relation] || l.relation}
-                          onClick={(ev) => { ev.stopPropagation(); onOpen(l.other.id); }}
+                          onClick={(ev) => { ev.stopPropagation(); onView(l.other.id); }}
                         >
                           {l.outgoing ? "→" : "←"} {l.other.title}
                         </button>
@@ -1416,6 +1541,55 @@ function EntryModal({ themes, entries, links, entry, onClose, onSave, onDelete, 
   );
 }
 
+/* ---------- Visualisation (lecture seule) ---------- */
+function ViewModal({ entry, allThemes, allEntries, links, onClose, onOpenEntry, onEdit }) {
+  const themeNames = entry.themeIds.map((tid) => allThemes.find((t) => t.id === tid)?.name).filter(Boolean);
+  const entryLinks = resolveEntryLinks(entry.id, links, allEntries);
+
+  return (
+    <div className="syn-overlay" onClick={onClose}>
+      <div className="syn-modal" onClick={(e) => e.stopPropagation()}>
+        <div className="syn-modal-rule" />
+        <h3 className="syn-modal-title">{entry.title}</h3>
+        {themeNames.length > 0 && (
+          <div className="syn-card-tags syn-view-tags">
+            {themeNames.map((name) => (
+              <span key={name} className="syn-tag">{name}</span>
+            ))}
+          </div>
+        )}
+        {entry.source && <div className="syn-card-source syn-view-source">{entry.source}</div>}
+        {entry.notes && <p className="syn-view-notes">{entry.notes}</p>}
+        <div className="syn-card-meta">Idée du {formatCapturedDate(entry.capturedAt)}</div>
+        {hasReference(entry) && <div className="syn-card-reference">{formatReference(entry)}</div>}
+        {entryLinks.length > 0 && (
+          <div className="syn-card-links syn-view-links">
+            <span className="syn-card-links-label">Fiches liées</span>
+            <div className="syn-card-links-list">
+              {entryLinks.map((l) => (
+                <button
+                  key={l.id}
+                  type="button"
+                  className="syn-card-link-btn"
+                  title={RELATION_LABELS[l.relation] || l.relation}
+                  onClick={() => onOpenEntry(l.other.id)}
+                >
+                  {l.outgoing ? "→" : "←"} {l.other.title}
+                </button>
+              ))}
+            </div>
+          </div>
+        )}
+        <div className="syn-modal-actions">
+          <div className="syn-spacer" />
+          <button className="syn-btn" onClick={onClose}>Fermer</button>
+          <button className="syn-btn syn-btn-primary" onClick={onEdit}>Modifier</button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 /* ---------- Corbeille ---------- */
 function TrashModal({ entries, onClose, onRestore, onPurge }) {
   const purge = (e) => {
@@ -1506,6 +1680,15 @@ const css = `
 
 /* ----- kanban ----- */
 .syn-board-section { margin-bottom: 48px; }
+
+/* ----- suggestions de liens ----- */
+.syn-suggestions { margin-bottom: 48px; }
+.syn-suggestion-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(260px, 1fr)); gap: 16px; }
+.syn-suggestion-card { background: var(--fiche); border: 1px solid var(--ligne); border-radius: 6px; padding: 16px; }
+.syn-suggestion-pair { display: flex; align-items: baseline; gap: 8px; flex-wrap: wrap; margin-bottom: 8px; }
+.syn-suggestion-arrow { color: var(--encre-2); flex-shrink: 0; }
+.syn-suggestion-keywords { font-size: 12px; color: var(--encre-2); font-style: italic; margin-bottom: 12px; }
+.syn-suggestion-actions { display: flex; gap: 8px; }
 .syn-board { display: flex; gap: 16px; align-items: flex-start; overflow-x: auto; padding-bottom: 12px; }
 .syn-col { min-width: 240px; width: 240px; flex-shrink: 0; border-radius: 6px; padding: 4px; transition: background 0.15s; }
 .syn-col-over { background: var(--vert-clair); }
@@ -1535,6 +1718,10 @@ const css = `
 .syn-card-links-list { display: flex; flex-direction: column; gap: 2px; }
 .syn-card-link-btn { display: block; width: 100%; text-align: left; border: none; background: none; color: var(--vert); font: inherit; font-size: 12px; cursor: pointer; padding: 2px 0; text-decoration: underline; text-decoration-color: transparent; }
 .syn-card-link-btn:hover { text-decoration-color: var(--vert); }
+.syn-view-tags { margin-top: 0; margin-bottom: 14px; }
+.syn-view-source { margin-bottom: 10px; }
+.syn-view-notes { font-size: 13.5px; color: var(--encre); white-space: pre-wrap; line-height: 1.55; margin: 0 0 16px; }
+.syn-view-links { margin-top: 16px; margin-bottom: 4px; }
 .syn-card-edit-btn { display: block; border: none; background: none; color: var(--vert); font: inherit; font-size: 12.5px; font-weight: 600; cursor: pointer; padding: 10px 0 0; }
 .syn-card-edit-btn:hover { text-decoration: underline; }
 .syn-load-more { display: block; width: 100%; border: 1px dashed var(--ligne); background: none; color: var(--encre-2); font: inherit; font-size: 12.5px; padding: 8px; border-radius: 4px; cursor: pointer; margin-top: 2px; margin-bottom: 10px; transition: border-color 0.12s, color 0.12s; }

@@ -61,11 +61,23 @@ create table if not exists imported_batches (
   imported_at timestamptz not null default now()
 );
 
+-- Paires de fiches pour lesquelles une suggestion de rapprochement (mots-clés
+-- communs) a été déclinée, pour ne plus la reproposer. entry_a_id est
+-- toujours la plus petite des deux id (ordre alphabétique), fixé côté appli.
+create table if not exists dismissed_suggestions (
+  entry_a_id text not null references entries(id) on delete cascade,
+  entry_b_id text not null references entries(id) on delete cascade,
+  owner_id uuid not null,
+  dismissed_at timestamptz not null default now(),
+  primary key (entry_a_id, entry_b_id)
+);
+
 alter table themes enable row level security;
 alter table entries enable row level security;
 alter table entry_themes enable row level security;
 alter table entry_links enable row level security;
 alter table imported_batches enable row level security;
+alter table dismissed_suggestions enable row level security;
 
 -- Chaque ligne n'est lisible/modifiable que par son propriétaire (owner_id = votre utilisateur connecté).
 -- Comme les inscriptions publiques seront désactivées et que vous serez la seule personne
@@ -85,6 +97,9 @@ create policy "owner_all_entry_links" on entry_links
 create policy "owner_all_imported_batches" on imported_batches
   for all using (owner_id = auth.uid()) with check (owner_id = auth.uid());
 
+create policy "owner_all_dismissed_suggestions" on dismissed_suggestions
+  for all using (owner_id = auth.uid()) with check (owner_id = auth.uid());
+
 -- Les policies RLS ci-dessus restreignent l'accès, mais ne l'accordent pas :
 -- sans ces GRANT, Postgres refuse toute requête ("permission denied") avant
 -- même de regarder les policies. On accorde uniquement au rôle "authenticated"
@@ -95,3 +110,4 @@ grant select, insert, update, delete on entries to authenticated;
 grant select, insert, update, delete on entry_themes to authenticated;
 grant select, insert, update, delete on entry_links to authenticated;
 grant select, insert, update, delete on imported_batches to authenticated;
+grant select, insert, update, delete on dismissed_suggestions to authenticated;
