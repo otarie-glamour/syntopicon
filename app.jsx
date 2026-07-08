@@ -26,6 +26,11 @@ const REF_COLUMNS = Object.values(REF_FIELD_COLUMNS);
 const REF_SELECT = REF_COLUMNS.join(",");
 const todayStr = () => new Date().toISOString().slice(0, 10);
 
+/* Texte de recherche d'une fiche : titre, notes, source et toute la référence bibliographique. */
+function searchHaystack(e) {
+  return [e.title, e.notes, e.source, ...Object.keys(REF_FIELD_COLUMNS).map((f) => e[f])].join(" ").toLowerCase();
+}
+
 /* Charge themes/entries (+ leurs thèmes N-N et leurs liens)/imported_batches de l'utilisateur connecté. */
 async function fetchRemoteData(userId) {
   const [
@@ -499,22 +504,22 @@ function Syntopicon() {
     setSaveState("saved");
   };
 
-  const addLink = async (fromId, toId, relation) => {
-    const link = { id: uid("lk"), fromId, toId, relation };
+  /* Lie une fiche à plusieurs autres en une seule fois, avec la même relation. */
+  const addLinks = async (fromId, toIds, relation) => {
+    const existing = new Set(
+      data.links.filter((l) => l.fromId === fromId && l.relation === relation).map((l) => l.toId)
+    );
+    const newLinks = toIds.filter((toId) => !existing.has(toId)).map((toId) => ({ id: uid("lk"), fromId, toId, relation }));
+    if (!newLinks.length) return;
     setSaveState("saving");
-    const { error } = await sb.from("entry_links").insert({
-      id: link.id,
-      from_entry_id: fromId,
-      to_entry_id: toId,
-      relation,
-      owner_id: session.user.id,
-    });
+    const { error } = await sb.from("entry_links").insert(
+      newLinks.map((l) => ({ id: l.id, from_entry_id: l.fromId, to_entry_id: l.toId, relation: l.relation, owner_id: session.user.id }))
+    );
     if (error) {
-      if (error.code === "23505") window.alert("Ce lien existe déjà.");
       setSaveState("error");
       return;
     }
-    setData((d) => ({ ...d, links: [...d.links, link] }));
+    setData((d) => ({ ...d, links: [...d.links, ...newLinks] }));
     setSaveState("saved");
   };
 
@@ -625,11 +630,7 @@ function Syntopicon() {
   const filtered = useMemo(() => {
     const q = search.trim().toLowerCase();
     if (!q) return activeEntries;
-    const refFields = Object.keys(REF_FIELD_COLUMNS);
-    return activeEntries.filter((e) => {
-      const haystack = [e.title, e.notes, e.source, ...refFields.map((f) => e[f])].join(" ").toLowerCase();
-      return haystack.includes(q);
-    });
+    return activeEntries.filter((e) => searchHaystack(e).includes(q));
   }, [activeEntries, search]);
 
   const byTheme = useMemo(() => {
@@ -912,7 +913,7 @@ function Syntopicon() {
           onClose={() => setEditing(null)}
           onSave={(patch) => { updateEntry(editingEntry.id, patch); setEditing(null); }}
           onDelete={() => deleteEntry(editingEntry.id)}
-          onAddLink={addLink}
+          onAddLinks={addLinks}
           onDeleteLink={deleteLink}
           onOpenEntry={setEditing}
           onAddTheme={addTheme}
@@ -1142,7 +1143,7 @@ function buildRis(entries) {
   return records.join("\n\n");
 }
 
-function EntryModal({ themes, entries, links, entry, onClose, onSave, onDelete, onAddLink, onDeleteLink, onOpenEntry, onAddTheme }) {
+function EntryModal({ themes, entries, links, entry, onClose, onSave, onDelete, onAddLinks, onDeleteLink, onOpenEntry, onAddTheme }) {
   const [title, setTitle] = useState(entry ? entry.title : "");
   const [themeIds, setThemeIds] = useState(entry ? entry.themeIds || [] : []);
   const [newThemeName, setNewThemeName] = useState("");
@@ -1163,7 +1164,9 @@ function EntryModal({ themes, entries, links, entry, onClose, onSave, onDelete, 
   });
   const [showBiblio, setShowBiblio] = useState(entry ? Object.values(ref).some(Boolean) : false);
   const [linkRelation, setLinkRelation] = useState(RELATION_TYPES[0].value);
-  const [linkQuery, setLinkQuery] = useState("");
+  const [linkFilter, setLinkFilter] = useState("");
+  const [linkThemeFilter, setLinkThemeFilter] = useState("");
+  const [selectedLinkIds, setSelectedLinkIds] = useState([]);
 
   const toggleTheme = (id) => {
     setThemeIds((ids) => (ids.includes(id) ? ids.filter((tid) => tid !== id) : [...ids, id]));
@@ -1214,11 +1217,21 @@ function EntryModal({ themes, entries, links, entry, onClose, onSave, onDelete, 
     : [];
 
   const otherEntries = entry ? (entries || []).filter((e) => e.id !== entry.id) : [];
-  const linkTarget = otherEntries.find((e) => e.title === linkQuery);
-  const addLinkClick = () => {
-    if (!linkTarget) return;
-    onAddLink(entry.id, linkTarget.id, linkRelation);
-    setLinkQuery("");
+  const linkCandidates = otherEntries.filter((e) => {
+    if (linkThemeFilter && !e.themeIds.includes(linkThemeFilter)) return false;
+    const q = linkFilter.trim().toLowerCase();
+    return !q || searchHaystack(e).includes(q);
+  });
+
+  const toggleLinkSelect = (id) => {
+    setSelectedLinkIds((ids) => (ids.includes(id) ? ids.filter((x) => x !== id) : [...ids, id]));
+  };
+
+  const addSelectedLinks = () => {
+    if (!selectedLinkIds.length) return;
+    onAddLinks(entry.id, selectedLinkIds, linkRelation);
+    setSelectedLinkIds([]);
+    setLinkFilter("");
   };
 
   return (
@@ -1318,23 +1331,44 @@ function EntryModal({ themes, entries, links, entry, onClose, onSave, onDelete, 
               ))}
             </div>
             <div className="syn-link-add">
-              <select className="syn-input syn-input-sm" value={linkRelation} onChange={(e) => setLinkRelation(e.target.value)}>
-                {RELATION_TYPES.map((r) => (
-                  <option key={r.value} value={r.value}>{r.label}</option>
+              <div className="syn-link-picker-controls">
+                <select className="syn-input syn-input-sm" value={linkRelation} onChange={(e) => setLinkRelation(e.target.value)}>
+                  {RELATION_TYPES.map((r) => (
+                    <option key={r.value} value={r.value}>{r.label}</option>
+                  ))}
+                </select>
+                <select className="syn-input syn-input-sm" value={linkThemeFilter} onChange={(e) => setLinkThemeFilter(e.target.value)}>
+                  <option value="">Tous les thèmes</option>
+                  {themes.map((t) => (
+                    <option key={t.id} value={t.id}>{t.name}</option>
+                  ))}
+                </select>
+                <input
+                  className="syn-input syn-input-sm"
+                  placeholder="Mot-clé..."
+                  value={linkFilter}
+                  onChange={(e) => setLinkFilter(e.target.value)}
+                />
+              </div>
+              <div className="syn-link-picker">
+                {otherEntries.length === 0 && <p className="syn-empty-text">Aucune autre fiche disponible.</p>}
+                {otherEntries.length > 0 && linkCandidates.length === 0 && (
+                  <p className="syn-empty-text">Aucune fiche ne correspond au filtre.</p>
+                )}
+                {linkCandidates.map((e) => (
+                  <label key={e.id} className="syn-theme-check">
+                    <input type="checkbox" checked={selectedLinkIds.includes(e.id)} onChange={() => toggleLinkSelect(e.id)} />
+                    {e.title}
+                  </label>
                 ))}
-              </select>
-              <input
-                className="syn-input"
-                list="syn-entry-titles"
-                placeholder="Titre de la fiche à lier..."
-                value={linkQuery}
-                onChange={(e) => setLinkQuery(e.target.value)}
-              />
-              <datalist id="syn-entry-titles">
-                {otherEntries.map((e) => <option key={e.id} value={e.title} />)}
-              </datalist>
-              <button type="button" className="syn-btn syn-btn-sm" disabled={!linkTarget} onClick={addLinkClick}>
-                Lier
+              </div>
+              <button
+                type="button"
+                className="syn-btn syn-btn-sm"
+                disabled={selectedLinkIds.length === 0}
+                onClick={addSelectedLinks}
+              >
+                Lier {selectedLinkIds.length > 0 ? `(${selectedLinkIds.length})` : "la sélection"}
               </button>
             </div>
           </div>
@@ -1535,8 +1569,10 @@ const css = `
 .syn-link-relation { color: var(--encre-2); font-size: 12px; white-space: nowrap; }
 .syn-link-title { flex: 1; text-align: left; border: none; background: none; color: var(--encre); font: inherit; font-weight: 500; cursor: pointer; padding: 2px 0; text-decoration: underline; text-decoration-color: var(--ligne); }
 .syn-link-title:hover { text-decoration-color: var(--vert); color: var(--vert); }
-.syn-link-add { display: flex; gap: 6px; }
-.syn-link-add .syn-input { flex: 1; }
+.syn-link-add { display: flex; flex-direction: column; gap: 8px; }
+.syn-link-picker-controls { display: flex; gap: 6px; }
+.syn-link-picker-controls .syn-input { flex: 1; }
+.syn-link-picker { display: flex; flex-direction: column; gap: 4px; max-height: 160px; overflow-y: auto; padding: 10px; border: 1px solid var(--ligne); border-radius: 4px; background: var(--papier); }
 .syn-trash-list { display: flex; flex-direction: column; gap: 10px; max-height: 50vh; overflow-y: auto; }
 .syn-trash-row { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 10px 12px; border: 1px solid var(--ligne); border-radius: 4px; }
 .syn-trash-title { font-weight: 500; }
