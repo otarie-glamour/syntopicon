@@ -457,6 +457,19 @@ function Syntopicon() {
     return () => listener.subscription.unsubscribe();
   }, []);
 
+  /* Échap ferme la fenêtre actuellement ouverte, sans avoir à cliquer manuellement. */
+  useEffect(() => {
+    const handleKeyDown = (e) => {
+      if (e.key !== "Escape") return;
+      if (viewing) setViewing(null);
+      else if (editing) setEditing(null);
+      else if (creating) setCreating(false);
+      else if (showTrash) setShowTrash(false);
+    };
+    document.addEventListener("keydown", handleKeyDown);
+    return () => document.removeEventListener("keydown", handleKeyDown);
+  }, [viewing, editing, creating, showTrash]);
+
   /* ---------- chargement (une fois connecté) ---------- */
   useEffect(() => {
     if (!session) {
@@ -1091,6 +1104,7 @@ function Syntopicon() {
       {creating && (
         <EntryModal
           themes={data.themes}
+          entries={activeEntries}
           onClose={() => setCreating(false)}
           onSave={(e) => { addEntry(e); setCreating(false); }}
           onAddTheme={addTheme}
@@ -1419,6 +1433,40 @@ function EntryModal({ themes, entries, links, entry, onClose, onSave, onDelete, 
 
   const updateRef = (key, value) => setRef((r) => ({ ...r, [key]: value }));
 
+  /* Références bibliographiques déjà saisies ailleurs, dédupliquées par auteur(s)+titre,
+     pour les reprendre sans ressaisie. Les pages, elles, changent d'une fiche à l'autre
+     dans un même ouvrage : volontairement exclues de la reprise. */
+  const savedReferences = [];
+  const seenRefs = new Set();
+  (entries || []).forEach((e) => {
+    if (!e.refAuthors.trim() && !e.refTitle.trim()) return;
+    const sig = e.refAuthors.trim().toLowerCase() + "|" + e.refTitle.trim().toLowerCase();
+    if (seenRefs.has(sig)) return;
+    seenRefs.add(sig);
+    savedReferences.push({
+      sig,
+      label: [e.refAuthors, e.refTitle].filter(Boolean).join(" — ") || e.source || "Référence sans titre",
+      values: {
+        type: e.refType,
+        authors: e.refAuthors,
+        title: e.refTitle,
+        container: e.refContainer,
+        publisher: e.refPublisher,
+        year: e.refYear,
+        edition: e.refEdition,
+        isbn: e.refIsbn,
+        doi: e.refDoi,
+      },
+    });
+  });
+
+  const applyReferenceProfile = (sig) => {
+    const profile = savedReferences.find((p) => p.sig === sig);
+    if (!profile) return;
+    setRef((r) => ({ ...r, ...profile.values }));
+    setShowBiblio(true);
+  };
+
   const save = () => {
     if (!title.trim()) return;
     onSave({
@@ -1505,6 +1553,18 @@ function EntryModal({ themes, entries, links, entry, onClose, onSave, onDelete, 
           <input className="syn-input" value={source} onChange={(e) => setSource(e.target.value)} placeholder="Pascal, Lettres provinciales, XVI" />
         </label>
         <div className="syn-field">
+          {savedReferences.length > 0 && (
+            <select
+              className="syn-input syn-input-sm syn-ref-reuse"
+              value=""
+              onChange={(e) => e.target.value && applyReferenceProfile(e.target.value)}
+            >
+              <option value="">↺ Reprendre une référence déjà utilisée...</option>
+              {savedReferences.map((p) => (
+                <option key={p.sig} value={p.sig}>{p.label}</option>
+              ))}
+            </select>
+          )}
           <button type="button" className="syn-biblio-toggle" onClick={() => setShowBiblio((s) => !s)}>
             {showBiblio ? "▾" : "▸"} Référence bibliographique complète (pour export futur, Zotero...)
           </button>
@@ -1880,6 +1940,7 @@ const css = `
 .syn-theme-check input { cursor: pointer; }
 .syn-theme-add { display: flex; gap: 6px; margin-top: 8px; }
 .syn-theme-add .syn-input { flex: 1; }
+.syn-ref-reuse { display: block; width: 100%; margin-bottom: 8px; cursor: pointer; }
 .syn-biblio-toggle { display: block; width: 100%; text-align: left; border: none; background: none; color: var(--vert); font: inherit; font-size: 12px; font-weight: 600; letter-spacing: 0.02em; cursor: pointer; padding: 0 0 5px; }
 .syn-biblio-toggle:hover { text-decoration: underline; }
 .syn-biblio-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 10px 12px; padding: 10px; border: 1px solid var(--ligne); border-radius: 4px; background: var(--papier); }
