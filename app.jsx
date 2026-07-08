@@ -26,9 +26,9 @@ const REF_COLUMNS = Object.values(REF_FIELD_COLUMNS);
 const REF_SELECT = REF_COLUMNS.join(",");
 const todayStr = () => new Date().toISOString().slice(0, 10);
 
-/* Texte de recherche d'une fiche : titre, notes, source et toute la référence bibliographique. */
+/* Texte de recherche d'une fiche : titre, notes, réflexion et toute la référence bibliographique. */
 function searchHaystack(e) {
-  return [e.title, e.notes, e.source, e.reflection, ...Object.keys(REF_FIELD_COLUMNS).map((f) => e[f])]
+  return [e.title, e.notes, e.reflection, ...Object.keys(REF_FIELD_COLUMNS).map((f) => e[f])]
     .join(" ")
     .toLowerCase();
 }
@@ -152,7 +152,7 @@ async function fetchRemoteData(userId) {
     sb.from("themes").select("id,name").eq("owner_id", userId).order("name"),
     sb
       .from("entries")
-      .select(`id,title,source,notes,reflection,captured_at,${REF_SELECT},deleted_at,created_at`)
+      .select(`id,title,notes,reflection,captured_at,${REF_SELECT},deleted_at,created_at`)
       .eq("owner_id", userId)
       .order("created_at", { ascending: false }),
     sb.from("entry_themes").select("entry_id,theme_id").eq("owner_id", userId),
@@ -173,7 +173,6 @@ async function fetchRemoteData(userId) {
         id: e.id,
         title: e.title,
         themeIds: themeIdsByEntry[e.id] || [],
-        source: e.source || "",
         notes: e.notes || "",
         reflection: e.reflection || "",
         capturedAt: e.captured_at || todayStr(),
@@ -205,7 +204,6 @@ async function insertRows(userId, { themes = [], entries = [], batchIds = [] }) 
         const row = {
           id: e.id,
           title: e.title,
-          source: e.source,
           notes: e.notes,
           reflection: e.reflection || "",
           captured_at: e.capturedAt || todayStr(),
@@ -273,49 +271,42 @@ const IMPORT_BATCHES = [
         id: "en_fsp_damiens",
         title: "Du supplice de Damiens à l'emploi du temps (1757-1838)",
         theme: "Punition",
-        source: "Foucault, Surveiller et Punir (1975), I, ch. 1",
         notes: "L'ouverture du livre juxtapose le supplice de Damiens (1757) et le règlement de la maison des jeunes détenus de Paris (1838). En moins d'un siècle, le châtiment-spectacle disparaît au profit d'une pénalité sourde de l'emploi du temps. Ce n'est pas un adoucissement mais un changement d'économie punitive.",
       },
       {
         id: "en_fsp_ame",
         title: "La punition vise l'âme et non plus le corps",
         theme: "Punition",
-        source: "Foucault, Surveiller et Punir (1975), I, ch. 1",
         notes: "Déplacement de l'objet punitif : on ne châtie plus le corps, on corrige l'âme (penchants, volonté, dispositions). D'où le renversement de la formule chrétienne : l'âme devient la prison du corps.",
       },
       {
         id: "en_fsp_panoptique",
         title: "Le panoptique de Bentham",
         theme: "Pouvoir et discipline",
-        source: "Foucault, Surveiller et Punir (1975), III, ch. 3",
         notes: "Architecture induisant un état conscient et permanent de visibilité. Le détenu, ne sachant jamais s'il est observé, devient le principe de son propre assujettissement. Le pouvoir s'automatise et se désindividualise : il tient au dispositif, non à une personne.",
       },
       {
         id: "en_fsp_pouvoirsavoir",
         title: "Pouvoir-savoir",
         theme: "Connaissance",
-        source: "Foucault, Surveiller et Punir (1975), I, ch. 1",
         notes: "Pouvoir et savoir s'impliquent directement l'un l'autre : il n'y a pas de relation de pouvoir sans constitution corrélative d'un champ de savoir, ni de savoir qui ne suppose et ne constitue en même temps des relations de pouvoir.",
       },
       {
         id: "en_fsp_corpsdociles",
         title: "Les corps dociles",
         theme: "Pouvoir et discipline",
-        source: "Foucault, Surveiller et Punir (1975), III, ch. 1",
         notes: "La discipline fabrique des corps soumis et exercés. Techniques de répartition des individus dans l'espace : clôture, quadrillage, emplacements fonctionnels, rang. Le corps devient objet et cible d'un pouvoir qui le travaille dans le détail.",
       },
       {
         id: "en_fsp_examen",
         title: "L'examen : surveiller et normaliser",
         theme: "Pouvoir et discipline",
-        source: "Foucault, Surveiller et Punir (1975), III, ch. 2",
         notes: "L'examen combine la surveillance hiérarchique et la sanction normalisatrice. Il fait de chaque individu un cas : descriptible, mesurable, comparable. L'individu entre dans un champ documentaire (registres, dossiers) qui le constitue comme objet de savoir.",
       },
       {
         id: "en_fsp_delinquance",
         title: "La prison fabrique la délinquance",
         theme: "Punition",
-        source: "Foucault, Surveiller et Punir (1975), IV, ch. 2",
         notes: "L'échec apparent de la prison (récidive) est en réalité fonctionnel : elle produit un milieu délinquant clos, contrôlable, utilisable, et le différencie des illégalismes populaires. L'échec fait partie du fonctionnement.",
       },
     ],
@@ -353,7 +344,6 @@ function mergeImports(base) {
         id: e.id,
         title: e.title,
         themeIds: linkedThemeId ? [linkedThemeId] : [],
-        source: e.source,
         notes: e.notes,
         reflection: "",
         capturedAt: todayStr(),
@@ -515,7 +505,6 @@ function Syntopicon() {
       id: uid("en"),
       title: entry.title.trim(),
       themeIds: entry.themeIds || [],
-      source: (entry.source || "").trim(),
       notes: (entry.notes || "").trim(),
       reflection: (entry.reflection || "").trim(),
       capturedAt: entry.capturedAt || todayStr(),
@@ -529,7 +518,6 @@ function Syntopicon() {
     const row = {
       id: e.id,
       title: e.title,
-      source: e.source,
       notes: e.notes,
       reflection: e.reflection,
       captured_at: e.capturedAt,
@@ -560,7 +548,6 @@ function Syntopicon() {
     setSaveState("saving");
     const dbPatch = {};
     if ("title" in patch) dbPatch.title = patch.title;
-    if ("source" in patch) dbPatch.source = patch.source;
     if ("notes" in patch) dbPatch.notes = patch.notes;
     if ("reflection" in patch) dbPatch.reflection = patch.reflection;
     if ("capturedAt" in patch) dbPatch.captured_at = patch.capturedAt;
@@ -748,7 +735,7 @@ function Syntopicon() {
   const exportRis = () => {
     const ris = buildRis(activeEntries);
     if (!ris.trim()) {
-      window.alert("Aucune fiche avec une source ou une référence à exporter pour l'instant.");
+      window.alert("Aucune fiche avec une référence à exporter pour l'instant.");
       return;
     }
     const blob = new Blob([ris], { type: "application/x-research-info-systems" });
@@ -805,13 +792,21 @@ function Syntopicon() {
   const visibleThemes = data ? data.themes.filter((t) => byTheme[t.id]?.length > 0) : [];
   const hiddenThemes = data ? data.themes.filter((t) => !byTheme[t.id]?.length) : [];
 
-  const sources = useMemo(() => {
-    const m = {};
+  /* Regroupe par auteur(s)+titre (la page est volontairement exclue : sinon chaque
+     page d'un même livre compterait comme une provenance différente). */
+  const provenances = useMemo(() => {
+    const byWork = new Map();
     activeEntries.forEach((e) => {
-      const s = e.source || "Sans source";
-      m[s] = (m[s] || 0) + 1;
+      const authors = e.refAuthors.trim();
+      const title = e.refTitle.trim();
+      const hasWork = authors || title;
+      const sig = hasWork ? (authors + "|" + title).toLowerCase() : "__sans_reference__";
+      const label = hasWork ? [e.refAuthors, e.refTitle].filter(Boolean).join(" — ") : "Sans référence";
+      const cur = byWork.get(sig);
+      if (cur) cur.count += 1;
+      else byWork.set(sig, { label, count: 1 });
     });
-    return Object.entries(m).sort((a, b) => b[1] - a[1]);
+    return Array.from(byWork.values()).sort((a, b) => b.count - a.count);
   }, [activeEntries]);
 
   /* ---------- rendu ---------- */
@@ -1079,7 +1074,7 @@ function Syntopicon() {
             {activeEntries.length === 0 ? (
               <p className="syn-empty-text">Aucune entrée pour l'instant.</p>
             ) : (
-              sources.map(([s, n]) => <Bar key={s} label={s} n={n} max={sources[0][1]} />)
+              provenances.map((p) => <Bar key={p.label} label={p.label} n={p.count} max={provenances[0].count} />)
             )}
           </div>
           <div className="syn-ana-block">
@@ -1221,7 +1216,11 @@ function Column({ theme, entries, allThemes, allEntries, links, linkCounts, unli
                 )}
               </span>
             </div>
-            {e.source && <div className="syn-card-source">{e.source}</div>}
+            {hasReference(e) && (
+              <div className={"syn-card-reference" + (expanded ? "" : " syn-card-reference-clamp")}>
+                {formatReference(e)}
+              </div>
+            )}
             {e.notes && (
               <div className={"syn-card-notes" + (expanded ? " syn-card-notes-full" : "")}>{e.notes}</div>
             )}
@@ -1241,7 +1240,6 @@ function Column({ theme, entries, allThemes, allEntries, links, linkCounts, unli
                   </div>
                 )}
                 <div className="syn-card-meta">Idée du {formatCapturedDate(e.capturedAt)}</div>
-                {hasReference(e) && <div className="syn-card-reference">{formatReference(e)}</div>}
                 {entryCardLinks.length > 0 && (
                   <div className="syn-card-links">
                     <span className="syn-card-links-label">Fiches liées</span>
@@ -1361,8 +1359,8 @@ const RIS_TYPE_BY_REF_TYPE = {
 function buildRis(entries) {
   const records = [];
   entries.forEach((e) => {
-    if (!hasReference(e) && !e.source) return;
-    const title = e.refTitle || e.source || e.title;
+    if (!hasReference(e)) return;
+    const title = e.refTitle || e.title;
     const lines = [`TY  - ${RIS_TYPE_BY_REF_TYPE[e.refType] || "GEN"}`];
     (e.refAuthors || "")
       .split(";")
@@ -1395,7 +1393,6 @@ function EntryModal({ themes, entries, links, entry, onClose, onSave, onDelete, 
   const [title, setTitle] = useState(entry ? entry.title : "");
   const [themeIds, setThemeIds] = useState(entry ? entry.themeIds || [] : []);
   const [newThemeName, setNewThemeName] = useState("");
-  const [source, setSource] = useState(entry ? entry.source : "");
   const [notes, setNotes] = useState(entry ? entry.notes : "");
   const [reflection, setReflection] = useState(entry ? entry.reflection : "");
   const [capturedAt, setCapturedAt] = useState(entry ? entry.capturedAt : todayStr());
@@ -1445,7 +1442,7 @@ function EntryModal({ themes, entries, links, entry, onClose, onSave, onDelete, 
     seenRefs.add(sig);
     savedReferences.push({
       sig,
-      label: [e.refAuthors, e.refTitle].filter(Boolean).join(" — ") || e.source || "Référence sans titre",
+      label: [e.refAuthors, e.refTitle].filter(Boolean).join(" — "),
       values: {
         type: e.refType,
         authors: e.refAuthors,
@@ -1472,7 +1469,6 @@ function EntryModal({ themes, entries, links, entry, onClose, onSave, onDelete, 
     onSave({
       title: title.trim(),
       themeIds,
-      source,
       notes,
       reflection: reflection.trim(),
       capturedAt,
@@ -1548,10 +1544,6 @@ function EntryModal({ themes, entries, links, entry, onClose, onSave, onDelete, 
             </button>
           </div>
         </div>
-        <label className="syn-field">
-          <span>Source (livre, article, cours...)</span>
-          <input className="syn-input" value={source} onChange={(e) => setSource(e.target.value)} placeholder="Pascal, Lettres provinciales, XVI" />
-        </label>
         <div className="syn-field">
           {savedReferences.length > 0 && (
             <select
@@ -1704,7 +1696,6 @@ function ViewModal({ entry, allThemes, allEntries, links, onClose, onOpenEntry, 
             ))}
           </div>
         )}
-        {entry.source && <div className="syn-card-source syn-view-source">{entry.source}</div>}
         {entry.notes && <p className="syn-view-notes">{entry.notes}</p>}
         {entry.reflection.trim() && (
           <div className="syn-reflection-box">
@@ -1763,7 +1754,6 @@ function TrashModal({ entries, onClose, onRestore, onPurge }) {
               <div key={e.id} className="syn-trash-row">
                 <div className="syn-trash-info">
                   <div className="syn-trash-title">{e.title}</div>
-                  {e.source && <div className="syn-card-source">{e.source}</div>}
                 </div>
                 <div className="syn-trash-actions">
                   <button className="syn-btn syn-btn-sm" onClick={() => onRestore(e.id)}>Restaurer</button>
@@ -1868,19 +1858,18 @@ const css = `
 .syn-reflection-label { display: block; font-family: 'IBM Plex Mono', monospace; font-size: 10.5px; font-weight: 600; text-transform: uppercase; letter-spacing: 0.06em; color: var(--reflexion); margin-bottom: 4px; }
 .syn-reflection-text { font-size: 13px; color: var(--encre); white-space: pre-wrap; margin: 0; line-height: 1.5; }
 .syn-card-reflection-box { margin-top: 10px; }
-.syn-card-source { font-family: 'IBM Plex Mono', monospace; font-size: 11px; color: var(--vert); margin-bottom: 4px; }
 .syn-card-notes { font-size: 12.5px; color: var(--encre-2); display: -webkit-box; -webkit-line-clamp: 3; -webkit-box-orient: vertical; overflow: hidden; }
 .syn-card-notes-full { display: block; -webkit-line-clamp: unset; white-space: pre-wrap; }
 .syn-card-tags { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 10px; }
 .syn-card-meta { font-family: 'IBM Plex Mono', monospace; font-size: 11px; color: var(--encre-2); margin-top: 8px; }
-.syn-card-reference { font-size: 11.5px; color: var(--encre-2); font-style: italic; margin-top: 4px; }
+.syn-card-reference { font-size: 11.5px; color: var(--encre-2); font-style: italic; margin-bottom: 4px; }
+.syn-card-reference-clamp { display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; }
 .syn-card-links { margin-top: 10px; }
 .syn-card-links-label { display: block; font-family: 'IBM Plex Mono', monospace; font-size: 10.5px; text-transform: uppercase; letter-spacing: 0.06em; color: var(--encre-2); margin-bottom: 4px; }
 .syn-card-links-list { display: flex; flex-direction: column; gap: 2px; }
 .syn-card-link-btn { display: block; width: 100%; text-align: left; border: none; background: none; color: var(--vert); font: inherit; font-size: 12px; cursor: pointer; padding: 2px 0; text-decoration: underline; text-decoration-color: transparent; }
 .syn-card-link-btn:hover { text-decoration-color: var(--vert); }
 .syn-view-tags { margin-top: 0; margin-bottom: 14px; }
-.syn-view-source { margin-bottom: 10px; }
 .syn-view-notes { font-size: 13.5px; color: var(--encre); white-space: pre-wrap; line-height: 1.55; margin: 0 0 16px; }
 .syn-view-links { margin-top: 16px; margin-bottom: 4px; }
 .syn-card-edit-btn { display: block; border: none; background: none; color: var(--vert); font: inherit; font-size: 12.5px; font-weight: 600; cursor: pointer; padding: 10px 0 0; }
