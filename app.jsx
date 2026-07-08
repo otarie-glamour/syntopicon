@@ -31,6 +31,18 @@ function searchHaystack(e) {
   return [e.title, e.notes, e.source, ...Object.keys(REF_FIELD_COLUMNS).map((f) => e[f])].join(" ").toLowerCase();
 }
 
+/* Liens (entrants et sortants) d'une fiche, résolus avec le titre de l'autre fiche. */
+function resolveEntryLinks(entryId, links, entries) {
+  return (links || [])
+    .filter((l) => l.fromId === entryId || l.toId === entryId)
+    .map((l) => {
+      const outgoing = l.fromId === entryId;
+      const other = (entries || []).find((e) => e.id === (outgoing ? l.toId : l.fromId));
+      return other ? { id: l.id, relation: l.relation, outgoing, other } : null;
+    })
+    .filter(Boolean);
+}
+
 /* Charge themes/entries (+ leurs thèmes N-N et leurs liens)/imported_batches de l'utilisateur connecté. */
 async function fetchRemoteData(userId) {
   const [
@@ -775,6 +787,8 @@ function Syntopicon() {
               theme={t}
               entries={byTheme[t.id]}
               allThemes={data.themes}
+              allEntries={activeEntries}
+              links={data.links}
               linkCounts={linkCounts}
               unlimited={Boolean(search.trim())}
               onOpen={setEditing}
@@ -801,6 +815,8 @@ function Syntopicon() {
               theme={{ id: "none", name: "Sans thème" }}
               entries={byTheme.none}
               allThemes={data.themes}
+              allEntries={activeEntries}
+              links={data.links}
               linkCounts={linkCounts}
               unlimited={Boolean(search.trim())}
               onOpen={setEditing}
@@ -934,7 +950,7 @@ function Syntopicon() {
 /* ---------- Colonne Kanban ---------- */
 const COLUMN_PAGE_SIZE = 20;
 
-function Column({ theme, entries, allThemes, linkCounts, unlimited, onOpen, onRename, onDelete, muted, dragOver, onDragOver, onDragLeave, onDrop, onDragStart }) {
+function Column({ theme, entries, allThemes, allEntries, links, linkCounts, unlimited, onOpen, onRename, onDelete, muted, dragOver, onDragOver, onDragLeave, onDrop, onDragStart }) {
   const [renaming, setRenaming] = useState(false);
   const [name, setName] = useState(theme.name);
   const [visibleCount, setVisibleCount] = useState(COLUMN_PAGE_SIZE);
@@ -983,6 +999,7 @@ function Column({ theme, entries, allThemes, linkCounts, unlimited, onOpen, onRe
         const entryThemeNames = expanded
           ? e.themeIds.map((tid) => allThemes.find((t) => t.id === tid)?.name).filter(Boolean)
           : [];
+        const entryCardLinks = expanded ? resolveEntryLinks(e.id, links, allEntries) : [];
         return (
           <div
             key={e.id}
@@ -1012,6 +1029,24 @@ function Column({ theme, entries, allThemes, linkCounts, unlimited, onOpen, onRe
                 )}
                 <div className="syn-card-meta">Idée du {formatCapturedDate(e.capturedAt)}</div>
                 {hasReference(e) && <div className="syn-card-reference">{formatReference(e)}</div>}
+                {entryCardLinks.length > 0 && (
+                  <div className="syn-card-links">
+                    <span className="syn-card-links-label">Fiches liées</span>
+                    <div className="syn-card-links-list">
+                      {entryCardLinks.map((l) => (
+                        <button
+                          key={l.id}
+                          type="button"
+                          className="syn-card-link-btn"
+                          title={RELATION_LABELS[l.relation] || l.relation}
+                          onClick={(ev) => { ev.stopPropagation(); onOpen(l.other.id); }}
+                        >
+                          {l.outgoing ? "→" : "←"} {l.other.title}
+                        </button>
+                      ))}
+                    </div>
+                  </div>
+                )}
                 <button
                   type="button"
                   className="syn-card-edit-btn"
@@ -1205,16 +1240,7 @@ function EntryModal({ themes, entries, links, entry, onClose, onSave, onDelete, 
     });
   };
 
-  const entryLinks = entry
-    ? (links || [])
-        .filter((l) => l.fromId === entry.id || l.toId === entry.id)
-        .map((l) => {
-          const outgoing = l.fromId === entry.id;
-          const other = (entries || []).find((e) => e.id === (outgoing ? l.toId : l.fromId));
-          return other ? { id: l.id, relation: l.relation, outgoing, other } : null;
-        })
-        .filter(Boolean)
-    : [];
+  const entryLinks = entry ? resolveEntryLinks(entry.id, links, entries) : [];
 
   const otherEntries = entry ? (entries || []).filter((e) => e.id !== entry.id) : [];
   const linkCandidates = otherEntries.filter((e) => {
@@ -1504,6 +1530,11 @@ const css = `
 .syn-card-tags { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 10px; }
 .syn-card-meta { font-family: 'IBM Plex Mono', monospace; font-size: 11px; color: var(--encre-2); margin-top: 8px; }
 .syn-card-reference { font-size: 11.5px; color: var(--encre-2); font-style: italic; margin-top: 4px; }
+.syn-card-links { margin-top: 10px; }
+.syn-card-links-label { display: block; font-family: 'IBM Plex Mono', monospace; font-size: 10.5px; text-transform: uppercase; letter-spacing: 0.06em; color: var(--encre-2); margin-bottom: 4px; }
+.syn-card-links-list { display: flex; flex-direction: column; gap: 2px; }
+.syn-card-link-btn { display: block; width: 100%; text-align: left; border: none; background: none; color: var(--vert); font: inherit; font-size: 12px; cursor: pointer; padding: 2px 0; text-decoration: underline; text-decoration-color: transparent; }
+.syn-card-link-btn:hover { text-decoration-color: var(--vert); }
 .syn-card-edit-btn { display: block; border: none; background: none; color: var(--vert); font: inherit; font-size: 12.5px; font-weight: 600; cursor: pointer; padding: 10px 0 0; }
 .syn-card-edit-btn:hover { text-decoration: underline; }
 .syn-load-more { display: block; width: 100%; border: 1px dashed var(--ligne); background: none; color: var(--encre-2); font: inherit; font-size: 12.5px; padding: 8px; border-radius: 4px; cursor: pointer; margin-top: 2px; margin-bottom: 10px; transition: border-color 0.12s, color 0.12s; }
