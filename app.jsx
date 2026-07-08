@@ -122,6 +122,29 @@ function themeColor(themeId, allThemes) {
   return i < THEME_COLORS.length ? THEME_COLORS[i] : generateThemeColor(i);
 }
 
+/* Dégradé conique à paliers nets : une bande par thème, répartie sur tout le tour. */
+function multiThemeConicGradient(colors) {
+  const n = colors.length;
+  const stops = colors.map((c, i) => `${c} ${(i / n) * 100}% ${((i + 1) / n) * 100}%`).join(", ");
+  return `conic-gradient(from 0deg, ${stops})`;
+}
+
+/* Style de contour d'une carte selon ses thèmes : une couleur si un seul thème,
+   un dégradé à bandes si plusieurs (bg + border-box évite le souci classique du
+   border-image, qui ignore les coins arrondis). */
+function cardBorderStyle(themeIds, allThemes, expanded) {
+  const colors = themeIds.map((tid) => themeColor(tid, allThemes).text);
+  if (colors.length === 0) {
+    return expanded ? { border: "3px solid #2F5D50" } : undefined;
+  }
+  const width = expanded ? 5 : 4;
+  const layer = colors.length === 1 ? `${colors[0]} border-box` : `${multiThemeConicGradient(colors)} border-box`;
+  return {
+    border: `${width}px solid transparent`,
+    background: `linear-gradient(var(--fiche), var(--fiche)) padding-box, ${layer}`,
+  };
+}
+
 /* ---------- Suggestions de rapprochement (mots-clés communs, pondérés) ---------- */
 /* Mots structurels/grammaticaux : connecteurs logiques, pronoms, formes très
    courantes des verbes être/avoir/faire/pouvoir/devoir, adverbes courants.
@@ -1283,6 +1306,7 @@ function Column({ theme, entries, allThemes, allEntries, links, linkCounts, unli
           <div
             key={e.id}
             className={"syn-card" + (expanded ? " syn-card-expanded" : "")}
+            style={cardBorderStyle(e.themeIds, allThemes, expanded)}
             draggable
             onDragStart={() => onDragStart(e.id)}
             onClick={() => toggleExpand(e.id)}
@@ -1945,7 +1969,6 @@ const css = `
 /* fiches : le filet rouge sous le titre est la signature visuelle */
 .syn-card { background: var(--fiche); border: 1px solid var(--ligne); border-radius: 4px; padding: 12px 14px 10px; margin-bottom: 10px; cursor: pointer; box-shadow: 0 1px 2px rgba(34,48,63,0.06); transition: transform 0.12s, box-shadow 0.12s; }
 .syn-card:hover { transform: translateY(-1px); box-shadow: 0 3px 8px rgba(34,48,63,0.10); }
-.syn-card-expanded, .syn-card-expanded:hover { border-color: var(--vert); }
 .syn-card-title { font-weight: 500; padding-bottom: 7px; border-bottom: 1px solid var(--filet); margin-bottom: 7px; display: flex; align-items: baseline; justify-content: space-between; gap: 8px; }
 .syn-card-badges { display: flex; align-items: center; gap: 6px; flex-shrink: 0; }
 .syn-card-linkcount { font-family: 'IBM Plex Mono', monospace; font-size: 10.5px; color: var(--encre-2); font-weight: 400; white-space: nowrap; }
