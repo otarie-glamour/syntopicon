@@ -529,19 +529,22 @@ function Syntopicon() {
     setSaveState("saved");
   };
 
+  /* Retourne le thème (existant ou nouvellement créé) pour permettre de le sélectionner aussitôt. */
   const addTheme = async (name) => {
     const n = name.trim();
-    if (!n) return;
-    if (data.themes.some((t) => t.name.toLowerCase() === n.toLowerCase())) return;
+    if (!n) return null;
+    const existing = data.themes.find((t) => t.name.toLowerCase() === n.toLowerCase());
+    if (existing) return existing;
     const t = { id: uid("th"), name: n };
     setSaveState("saving");
     const { error } = await sb.from("themes").insert({ id: t.id, name: t.name, owner_id: session.user.id });
     if (error) {
       setSaveState("error");
-      return;
+      return null;
     }
     setData((d) => ({ ...d, themes: [...d.themes, t] }));
     setSaveState("saved");
+    return t;
   };
 
   const renameTheme = async (id, name) => {
@@ -896,6 +899,7 @@ function Syntopicon() {
           themes={data.themes}
           onClose={() => setCreating(false)}
           onSave={(e) => { addEntry(e); setCreating(false); }}
+          onAddTheme={addTheme}
         />
       )}
       {editingEntry && (
@@ -911,6 +915,7 @@ function Syntopicon() {
           onAddLink={addLink}
           onDeleteLink={deleteLink}
           onOpenEntry={setEditing}
+          onAddTheme={addTheme}
         />
       )}
       {showTrash && (
@@ -1137,9 +1142,10 @@ function buildRis(entries) {
   return records.join("\n\n");
 }
 
-function EntryModal({ themes, entries, links, entry, onClose, onSave, onDelete, onAddLink, onDeleteLink, onOpenEntry }) {
+function EntryModal({ themes, entries, links, entry, onClose, onSave, onDelete, onAddLink, onDeleteLink, onOpenEntry, onAddTheme }) {
   const [title, setTitle] = useState(entry ? entry.title : "");
   const [themeIds, setThemeIds] = useState(entry ? entry.themeIds || [] : []);
+  const [newThemeName, setNewThemeName] = useState("");
   const [source, setSource] = useState(entry ? entry.source : "");
   const [notes, setNotes] = useState(entry ? entry.notes : "");
   const [capturedAt, setCapturedAt] = useState(entry ? entry.capturedAt : todayStr());
@@ -1161,6 +1167,16 @@ function EntryModal({ themes, entries, links, entry, onClose, onSave, onDelete, 
 
   const toggleTheme = (id) => {
     setThemeIds((ids) => (ids.includes(id) ? ids.filter((tid) => tid !== id) : [...ids, id]));
+  };
+
+  const addNewTheme = async () => {
+    const n = newThemeName.trim();
+    if (!n) return;
+    const t = await onAddTheme(n);
+    if (t) {
+      setThemeIds((ids) => (ids.includes(t.id) ? ids : [...ids, t.id]));
+      setNewThemeName("");
+    }
   };
 
   const updateRef = (key, value) => setRef((r) => ({ ...r, [key]: value }));
@@ -1228,6 +1244,20 @@ function EntryModal({ themes, entries, links, entry, onClose, onSave, onDelete, 
                 {t.name}
               </label>
             ))}
+          </div>
+          <div className="syn-theme-add">
+            <input
+              className="syn-input syn-input-sm"
+              placeholder="Nouveau thème..."
+              value={newThemeName}
+              onChange={(e) => setNewThemeName(e.target.value)}
+              onKeyDown={(e) => {
+                if (e.key === "Enter") { e.preventDefault(); addNewTheme(); }
+              }}
+            />
+            <button type="button" className="syn-btn syn-btn-sm" disabled={!newThemeName.trim()} onClick={addNewTheme}>
+              + Créer et sélectionner
+            </button>
           </div>
         </div>
         <label className="syn-field">
@@ -1492,6 +1522,8 @@ const css = `
 .syn-theme-checks { display: flex; flex-wrap: wrap; gap: 6px 14px; max-height: 160px; overflow-y: auto; padding: 10px; border: 1px solid var(--ligne); border-radius: 4px; background: var(--papier); }
 .syn-theme-check { display: flex; align-items: center; gap: 6px; font-size: 13px; cursor: pointer; white-space: nowrap; }
 .syn-theme-check input { cursor: pointer; }
+.syn-theme-add { display: flex; gap: 6px; margin-top: 8px; }
+.syn-theme-add .syn-input { flex: 1; }
 .syn-biblio-toggle { display: block; width: 100%; text-align: left; border: none; background: none; color: var(--vert); font: inherit; font-size: 12px; font-weight: 600; letter-spacing: 0.02em; cursor: pointer; padding: 0 0 5px; }
 .syn-biblio-toggle:hover { text-decoration: underline; }
 .syn-biblio-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 10px 12px; padding: 10px; border: 1px solid var(--ligne); border-radius: 4px; background: var(--papier); }
