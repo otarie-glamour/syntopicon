@@ -16,6 +16,9 @@ create table if not exists entries (
   title text not null,
   source text not null default '',
   notes text not null default '',
+  -- Réflexion personnelle : vos questionnements/commentaires, distincts de ce
+  -- que retient la fiche de la lecture elle-même (le champ "notes").
+  reflection text not null default '',
   -- Date de l'idée/lecture elle-même (éditable, distincte de created_at qui
   -- est la date d'enregistrement technique dans l'outil).
   captured_at date not null default current_date,

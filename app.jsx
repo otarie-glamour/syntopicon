@@ -28,7 +28,9 @@ const todayStr = () => new Date().toISOString().slice(0, 10);
 
 /* Texte de recherche d'une fiche : titre, notes, source et toute la référence bibliographique. */
 function searchHaystack(e) {
-  return [e.title, e.notes, e.source, ...Object.keys(REF_FIELD_COLUMNS).map((f) => e[f])].join(" ").toLowerCase();
+  return [e.title, e.notes, e.source, e.reflection, ...Object.keys(REF_FIELD_COLUMNS).map((f) => e[f])]
+    .join(" ")
+    .toLowerCase();
 }
 
 /* Liens (entrants et sortants) d'une fiche, résolus avec le titre de l'autre fiche. */
@@ -43,14 +45,31 @@ function resolveEntryLinks(entryId, links, entries) {
     .filter(Boolean);
 }
 
-/* ---------- Suggestions de rapprochement (mots-clés communs) ---------- */
+/* ---------- Suggestions de rapprochement (mots-clés communs, pondérés) ---------- */
+/* Mots structurels/grammaticaux : connecteurs logiques, pronoms, formes très
+   courantes des verbes être/avoir/faire/pouvoir/devoir, adverbes courants.
+   Ne couvre pas le vocabulaire "banal mais spécifique au corpus" (ex : un mot
+   qui revient dans la moitié de vos fiches) : ce cas est traité séparément,
+   de façon adaptative, par la pondération par fréquence ci-dessous. */
 const SUGGESTION_STOPWORDS = new Set([
-  "dans", "avec", "pour", "sont", "être", "avoir", "fait", "faire", "cette",
-  "leur", "leurs", "tout", "tous", "toute", "toutes", "sans", "sous", "vers", "chez",
-  "depuis", "pendant", "notre", "votre", "nos", "vos", "comme", "donc", "mais", "plus",
-  "moins", "très", "bien", "aussi", "alors", "ainsi", "entre", "encore", "quand", "dont",
-  "elle", "elles", "nous", "vous", "ils", "cela", "ceci", "quel", "quelle", "quels",
-  "quelles", "peut", "peuvent", "était", "étaient", "sera", "seront", "autre", "autres",
+  "dans", "avec", "pour", "sans", "sous", "vers", "chez", "entre", "depuis", "pendant",
+  "selon", "avant", "après", "contre", "malgré", "sauf",
+  "donc", "ainsi", "alors", "ensuite", "enfin", "cependant", "néanmoins", "toutefois",
+  "pourtant", "lorsque", "tandis", "quoique", "puisque", "comme", "quand", "dont", "or",
+  "car", "chaque", "quel", "quelle", "quels", "quelles", "même", "mêmes",
+  "certain", "certains", "certaine", "certaines", "plusieurs", "aucun", "aucune",
+  "chacun", "chacune", "celui", "celle", "ceux", "celles", "cela", "ceci",
+  "elle", "elles", "nous", "vous", "ils", "leur", "leurs", "notre", "votre", "nos", "vos",
+  "tout", "tous", "toute", "toutes", "autre", "autres",
+  "être", "étais", "était", "étions", "étiez", "étaient", "serai", "seras", "sera",
+  "serons", "serez", "seront", "avoir", "avais", "avait", "avions", "aviez", "avaient",
+  "aurai", "auras", "aura", "aurons", "aurez", "auront",
+  "fait", "faisait", "faisons", "faites", "font", "ferai", "feras", "fera", "ferons",
+  "ferez", "feront",
+  "peut", "peux", "peuvent", "pouvait", "pourra", "pourrait",
+  "doit", "doivent", "devait", "devrait",
+  "très", "bien", "aussi", "encore", "jamais", "toujours", "souvent", "parfois",
+  "plutôt", "surtout", "seulement", "beaucoup", "assez", "trop", "moins", "plus",
 ]);
 
 /* Mots significatifs (4+ lettres, hors mots vides) d'un texte, en minuscules. */
@@ -64,12 +83,34 @@ function pairKey(id1, id2) {
   return id1 < id2 ? [id1, id2] : [id2, id1];
 }
 
+/* Un mot-clé compte d'autant plus qu'il est rare dans l'ensemble du corpus
+   (façon TF-IDF) ; un mot qui revient dans une grosse part de vos fiches
+   (par ex. un terme récurrent de votre vocabulaire de recherche) est
+   automatiquement écarté, même s'il n'est pas dans la liste de mots vides. */
+const SUGGESTION_MAX_DOC_SHARE = 0.25; // au-delà de 25% des fiches, un mot est jugé trop commun
+const SUGGESTION_MIN_SHARED = 2; // au moins 2 mots-clés distinctifs communs
+const SUGGESTION_MIN_SCORE = 3; // score cumulé minimal (somme des poids des mots partagés)
+
 /* Calcule des suggestions de liens entre fiches non déjà liées, à partir des
-   mots-clés communs à leur titre et leurs notes. */
+   mots-clés communs (pondérés par rareté) à leur titre et leurs notes. */
 function computeSuggestions(entries, links, dismissedSuggestions, limit) {
   const withKeywords = entries
     .map((e) => ({ entry: e, keywords: new Set([...extractKeywords(e.title), ...extractKeywords(e.notes)]) }))
     .filter((x) => x.keywords.size > 0);
+
+  const n = withKeywords.length;
+  if (n < 2) return [];
+
+  const docFrequency = {};
+  withKeywords.forEach((x) => {
+    x.keywords.forEach((k) => { docFrequency[k] = (docFrequency[k] || 0) + 1; });
+  });
+  const maxDocCount = Math.max(3, Math.ceil(n * SUGGESTION_MAX_DOC_SHARE));
+  const weight = {};
+  Object.keys(docFrequency).forEach((k) => {
+    if (docFrequency[k] > maxDocCount) return; // trop commun dans ce corpus précis : ignoré
+    weight[k] = Math.log(n / docFrequency[k]);
+  });
 
   const linkedPairs = new Set();
   links.forEach((l) => {
@@ -79,20 +120,22 @@ function computeSuggestions(entries, links, dismissedSuggestions, limit) {
   const dismissedPairs = new Set(dismissedSuggestions.map((d) => d.aId + "|" + d.bId));
 
   const results = [];
-  for (let i = 0; i < withKeywords.length; i++) {
-    for (let j = i + 1; j < withKeywords.length; j++) {
+  for (let i = 0; i < n; i++) {
+    for (let j = i + 1; j < n; j++) {
       const a = withKeywords[i];
       const b = withKeywords[j];
       if (linkedPairs.has(a.entry.id + "|" + b.entry.id)) continue;
       const [x, y] = pairKey(a.entry.id, b.entry.id);
       if (dismissedPairs.has(x + "|" + y)) continue;
-      const shared = [...a.keywords].filter((k) => b.keywords.has(k));
-      if (shared.length >= 2) {
-        results.push({ a: a.entry, b: b.entry, shared });
-      }
+      const shared = [...a.keywords].filter((k) => b.keywords.has(k) && weight[k] !== undefined);
+      if (shared.length < SUGGESTION_MIN_SHARED) continue;
+      const score = shared.reduce((s, k) => s + weight[k], 0);
+      if (score < SUGGESTION_MIN_SCORE) continue;
+      shared.sort((k1, k2) => weight[k2] - weight[k1]);
+      results.push({ a: a.entry, b: b.entry, shared, score });
     }
   }
-  results.sort((r1, r2) => r2.shared.length - r1.shared.length);
+  results.sort((r1, r2) => r2.score - r1.score);
   return results.slice(0, limit);
 }
 
@@ -109,7 +152,7 @@ async function fetchRemoteData(userId) {
     sb.from("themes").select("id,name").eq("owner_id", userId).order("name"),
     sb
       .from("entries")
-      .select(`id,title,source,notes,captured_at,${REF_SELECT},deleted_at,created_at`)
+      .select(`id,title,source,notes,reflection,captured_at,${REF_SELECT},deleted_at,created_at`)
       .eq("owner_id", userId)
       .order("created_at", { ascending: false }),
     sb.from("entry_themes").select("entry_id,theme_id").eq("owner_id", userId),
@@ -132,6 +175,7 @@ async function fetchRemoteData(userId) {
         themeIds: themeIdsByEntry[e.id] || [],
         source: e.source || "",
         notes: e.notes || "",
+        reflection: e.reflection || "",
         capturedAt: e.captured_at || todayStr(),
         deletedAt: e.deleted_at ? new Date(e.deleted_at).getTime() : null,
         createdAt: new Date(e.created_at).getTime(),
@@ -163,6 +207,7 @@ async function insertRows(userId, { themes = [], entries = [], batchIds = [] }) 
           title: e.title,
           source: e.source,
           notes: e.notes,
+          reflection: e.reflection || "",
           captured_at: e.capturedAt || todayStr(),
           owner_id: userId,
         };
@@ -310,6 +355,7 @@ function mergeImports(base) {
         themeIds: linkedThemeId ? [linkedThemeId] : [],
         source: e.source,
         notes: e.notes,
+        reflection: "",
         capturedAt: todayStr(),
         refType: "",
         refAuthors: "",
@@ -401,6 +447,7 @@ function Syntopicon() {
   const [dragId, setDragId] = useState(null);
   const [dragOver, setDragOver] = useState(null);
   const [search, setSearch] = useState("");
+  const [reflectionFilter, setReflectionFilter] = useState("all"); // all | with | without
   const [showTrash, setShowTrash] = useState(false);
 
   /* ---------- authentification ---------- */
@@ -457,6 +504,7 @@ function Syntopicon() {
       themeIds: entry.themeIds || [],
       source: (entry.source || "").trim(),
       notes: (entry.notes || "").trim(),
+      reflection: (entry.reflection || "").trim(),
       capturedAt: entry.capturedAt || todayStr(),
       deletedAt: null,
       createdAt: Date.now(),
@@ -470,6 +518,7 @@ function Syntopicon() {
       title: e.title,
       source: e.source,
       notes: e.notes,
+      reflection: e.reflection,
       captured_at: e.capturedAt,
       owner_id: session.user.id,
     };
@@ -500,6 +549,7 @@ function Syntopicon() {
     if ("title" in patch) dbPatch.title = patch.title;
     if ("source" in patch) dbPatch.source = patch.source;
     if ("notes" in patch) dbPatch.notes = patch.notes;
+    if ("reflection" in patch) dbPatch.reflection = patch.reflection;
     if ("capturedAt" in patch) dbPatch.captured_at = patch.capturedAt;
     Object.entries(REF_FIELD_COLUMNS).forEach(([jsField, column]) => {
       if (jsField in patch) dbPatch[column] = patch[jsField];
@@ -720,9 +770,12 @@ function Syntopicon() {
 
   const filtered = useMemo(() => {
     const q = search.trim().toLowerCase();
-    if (!q) return activeEntries;
-    return activeEntries.filter((e) => searchHaystack(e).includes(q));
-  }, [activeEntries, search]);
+    return activeEntries.filter((e) => {
+      if (reflectionFilter === "with" && !e.reflection.trim()) return false;
+      if (reflectionFilter === "without" && e.reflection.trim()) return false;
+      return !q || searchHaystack(e).includes(q);
+    });
+  }, [activeEntries, search, reflectionFilter]);
 
   const byTheme = useMemo(() => {
     const map = { none: [] };
@@ -858,6 +911,16 @@ function Syntopicon() {
             value={search}
             onChange={(e) => setSearch(e.target.value)}
           />
+          <select
+            className="syn-search syn-reflection-filter"
+            value={reflectionFilter}
+            onChange={(e) => setReflectionFilter(e.target.value)}
+            title="Filtrer selon la présence d'une réflexion personnelle"
+          >
+            <option value="all">Toutes les fiches</option>
+            <option value="with">Avec réflexion</option>
+            <option value="without">Sans réflexion</option>
+          </select>
         </div>
 
         <div className="syn-board">
@@ -1135,13 +1198,24 @@ function Column({ theme, entries, allThemes, allEntries, links, linkCounts, unli
           >
             <div className="syn-card-title">
               {e.title}
-              {linkCounts[e.id] > 0 && (
-                <span className="syn-card-linkcount" title="Fiches liées">🔗 {linkCounts[e.id]}</span>
-              )}
+              <span className="syn-card-badges">
+                {e.reflection.trim() && (
+                  <span className="syn-card-reflectioncount" title="Réflexion personnelle jointe">💭</span>
+                )}
+                {linkCounts[e.id] > 0 && (
+                  <span className="syn-card-linkcount" title="Fiches liées">🔗 {linkCounts[e.id]}</span>
+                )}
+              </span>
             </div>
             {e.source && <div className="syn-card-source">{e.source}</div>}
             {e.notes && (
               <div className={"syn-card-notes" + (expanded ? " syn-card-notes-full" : "")}>{e.notes}</div>
+            )}
+            {expanded && e.reflection.trim() && (
+              <div className="syn-reflection-box syn-card-reflection-box">
+                <span className="syn-reflection-label">💭 Réflexion personnelle</span>
+                <p className="syn-reflection-text">{e.reflection}</p>
+              </div>
             )}
             {expanded && (
               <>
@@ -1309,6 +1383,7 @@ function EntryModal({ themes, entries, links, entry, onClose, onSave, onDelete, 
   const [newThemeName, setNewThemeName] = useState("");
   const [source, setSource] = useState(entry ? entry.source : "");
   const [notes, setNotes] = useState(entry ? entry.notes : "");
+  const [reflection, setReflection] = useState(entry ? entry.reflection : "");
   const [capturedAt, setCapturedAt] = useState(entry ? entry.capturedAt : todayStr());
   const [ref, setRef] = useState({
     type: entry ? entry.refType : "",
@@ -1351,6 +1426,7 @@ function EntryModal({ themes, entries, links, entry, onClose, onSave, onDelete, 
       themeIds,
       source,
       notes,
+      reflection: reflection.trim(),
       capturedAt,
       refType: ref.type,
       refAuthors: ref.authors,
@@ -1458,7 +1534,17 @@ function EntryModal({ themes, entries, links, entry, onClose, onSave, onDelete, 
         </div>
         <label className="syn-field">
           <span>Annotations</span>
-          <textarea className="syn-textarea" rows={5} value={notes} onChange={(e) => setNotes(e.target.value)} placeholder="Votre lecture, vos objections, vos rapprochements..." />
+          <textarea className="syn-textarea" rows={5} value={notes} onChange={(e) => setNotes(e.target.value)} placeholder="Ce que vous retenez de la lecture : ce que dit l'auteur, le résumé de l'idée..." />
+        </label>
+        <label className="syn-field syn-field-reflection">
+          <span>💭 Réflexion personnelle</span>
+          <textarea
+            className="syn-textarea syn-textarea-reflection"
+            rows={4}
+            value={reflection}
+            onChange={(e) => setReflection(e.target.value)}
+            placeholder="Vos questionnements, objections, commentaires — ce qui est à vous, distinct de ce que dit l'auteur..."
+          />
         </label>
         {entry && (
           <div className="syn-field">
@@ -1560,6 +1646,12 @@ function ViewModal({ entry, allThemes, allEntries, links, onClose, onOpenEntry, 
         )}
         {entry.source && <div className="syn-card-source syn-view-source">{entry.source}</div>}
         {entry.notes && <p className="syn-view-notes">{entry.notes}</p>}
+        {entry.reflection.trim() && (
+          <div className="syn-reflection-box">
+            <span className="syn-reflection-label">💭 Réflexion personnelle</span>
+            <p className="syn-reflection-text">{entry.reflection}</p>
+          </div>
+        )}
         <div className="syn-card-meta">Idée du {formatCapturedDate(entry.capturedAt)}</div>
         {hasReference(entry) && <div className="syn-card-reference">{formatReference(entry)}</div>}
         {entryLinks.length > 0 && (
@@ -1645,6 +1737,8 @@ const css = `
   --vert-clair: #E3ECE8;
   --filet: #C25E5E;
   --ligne: #D6DAD2;
+  --reflexion: #9C7626;
+  --reflexion-clair: #F4ECD8;
   min-height: 100vh;
   background: var(--papier);
   color: var(--encre);
@@ -1677,6 +1771,7 @@ const css = `
 .syn-sub { color: var(--encre-2); font-size: 13px; }
 .syn-search { margin-left: auto; border: 1px solid var(--ligne); border-radius: 4px; padding: 6px 10px; font: inherit; background: var(--fiche); min-width: 180px; }
 .syn-search:focus { outline: 2px solid var(--vert); outline-offset: 1px; }
+.syn-reflection-filter { margin-left: 0; min-width: 0; cursor: pointer; }
 
 /* ----- kanban ----- */
 .syn-board-section { margin-bottom: 48px; }
@@ -1706,7 +1801,13 @@ const css = `
 .syn-card:hover { transform: translateY(-1px); box-shadow: 0 3px 8px rgba(34,48,63,0.10); }
 .syn-card-expanded, .syn-card-expanded:hover { border-color: var(--vert); }
 .syn-card-title { font-weight: 500; padding-bottom: 7px; border-bottom: 1px solid var(--filet); margin-bottom: 7px; display: flex; align-items: baseline; justify-content: space-between; gap: 8px; }
+.syn-card-badges { display: flex; align-items: center; gap: 6px; flex-shrink: 0; }
 .syn-card-linkcount { font-family: 'IBM Plex Mono', monospace; font-size: 10.5px; color: var(--encre-2); font-weight: 400; white-space: nowrap; }
+.syn-card-reflectioncount { font-size: 12px; }
+.syn-reflection-box { background: var(--reflexion-clair); border-left: 3px solid var(--reflexion); border-radius: 0 4px 4px 0; padding: 10px 12px; margin: 10px 0; }
+.syn-reflection-label { display: block; font-family: 'IBM Plex Mono', monospace; font-size: 10.5px; font-weight: 600; text-transform: uppercase; letter-spacing: 0.06em; color: var(--reflexion); margin-bottom: 4px; }
+.syn-reflection-text { font-size: 13px; color: var(--encre); white-space: pre-wrap; margin: 0; line-height: 1.5; }
+.syn-card-reflection-box { margin-top: 10px; }
 .syn-card-source { font-family: 'IBM Plex Mono', monospace; font-size: 11px; color: var(--vert); margin-bottom: 4px; }
 .syn-card-notes { font-size: 12.5px; color: var(--encre-2); display: -webkit-box; -webkit-line-clamp: 3; -webkit-box-orient: vertical; overflow: hidden; }
 .syn-card-notes-full { display: block; -webkit-line-clamp: unset; white-space: pre-wrap; }
@@ -1771,6 +1872,9 @@ const css = `
 .syn-modal-title { font-family: 'Cormorant Garamond', serif; font-weight: 600; font-size: 24px; margin: 0 0 18px; }
 .syn-field { display: block; margin-bottom: 14px; }
 .syn-field > span { display: block; font-size: 12px; font-weight: 600; letter-spacing: 0.02em; color: var(--encre-2); margin-bottom: 5px; }
+.syn-field-reflection > span { color: var(--reflexion); }
+.syn-textarea-reflection { background: var(--reflexion-clair); border-color: var(--reflexion); }
+.syn-textarea-reflection:focus { outline-color: var(--reflexion); }
 .syn-theme-checks { display: flex; flex-wrap: wrap; gap: 6px 14px; max-height: 160px; overflow-y: auto; padding: 10px; border: 1px solid var(--ligne); border-radius: 4px; background: var(--papier); }
 .syn-theme-check { display: flex; align-items: center; gap: 6px; font-size: 13px; cursor: pointer; white-space: nowrap; }
 .syn-theme-check input { cursor: pointer; }
