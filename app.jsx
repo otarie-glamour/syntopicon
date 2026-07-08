@@ -1074,7 +1074,7 @@ function Syntopicon() {
             {activeEntries.length === 0 ? (
               <p className="syn-empty-text">Aucune entrée pour l'instant.</p>
             ) : (
-              provenances.map((p) => <Bar key={p.label} label={p.label} n={p.count} max={provenances[0].count} />)
+              provenances.map((p) => <Bar key={p.label} label={p.label} n={p.count} max={provenances[0].count} wide />)
             )}
           </div>
           <div className="syn-ana-block">
@@ -1280,10 +1280,10 @@ function Column({ theme, entries, allThemes, allEntries, links, linkCounts, unli
 }
 
 /* ---------- Barre analytique ---------- */
-function Bar({ label, n, max, muted }) {
+function Bar({ label, n, max, muted, wide }) {
   return (
-    <div className="syn-bar-row">
-      <span className={"syn-bar-label" + (muted ? " syn-bar-label-muted" : "")}>{label}</span>
+    <div className={"syn-bar-row" + (wide ? " syn-bar-row-wide" : "")}>
+      <span className={"syn-bar-label" + (muted ? " syn-bar-label-muted" : "")} title={label}>{label}</span>
       <div className="syn-bar-track">
         <div className="syn-bar-fill" style={{ width: max ? Math.max(n / max * 100, n > 0 ? 4 : 0) + "%" : 0 }} />
       </div>
@@ -1895,6 +1895,10 @@ const css = `
 .syn-bar-row { display: grid; grid-template-columns: 110px 1fr 24px; align-items: center; gap: 10px; margin-bottom: 8px; }
 .syn-bar-label { font-size: 12.5px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .syn-bar-label-muted { color: var(--encre-2); font-style: italic; }
+.syn-bar-row-wide { grid-template-columns: 1fr 24px; grid-template-areas: "label label" "track count"; row-gap: 4px; margin-bottom: 12px; }
+.syn-bar-row-wide .syn-bar-label { grid-area: label; white-space: normal; overflow: visible; text-overflow: clip; line-height: 1.3; }
+.syn-bar-row-wide .syn-bar-track { grid-area: track; }
+.syn-bar-row-wide .syn-count { grid-area: count; justify-self: end; }
 .syn-bar-track { height: 8px; background: var(--papier); border-radius: 4px; overflow: hidden; }
 .syn-bar-fill { height: 100%; background: var(--vert); border-radius: 4px; transition: width 0.3s; }
 .syn-empty-text { font-size: 13px; color: var(--encre-2); margin: 0 0 10px; }
