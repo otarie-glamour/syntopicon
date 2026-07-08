@@ -326,7 +326,6 @@ function Syntopicon() {
   const [dragOver, setDragOver] = useState(null);
   const [search, setSearch] = useState("");
   const [showTrash, setShowTrash] = useState(false);
-  const [expandedId, setExpandedId] = useState(null); // fiche dépliée sur le tableau
 
   /* ---------- authentification ---------- */
   useEffect(() => {
@@ -589,7 +588,22 @@ function Syntopicon() {
     setTimeout(() => setQuickFlash(false), 1500);
   };
 
-  const toggleExpand = (id) => setExpandedId((cur) => (cur === id ? null : id));
+  const exportRis = () => {
+    const ris = buildRis(activeEntries);
+    if (!ris.trim()) {
+      window.alert("Aucune fiche avec une source ou une référence à exporter pour l'instant.");
+      return;
+    }
+    const blob = new Blob([ris], { type: "application/x-research-info-systems" });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = "syntopicon.ris";
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    URL.revokeObjectURL(url);
+  };
 
   /* ---------- dérivés ---------- */
   const linkCounts = useMemo(() => {
@@ -608,12 +622,11 @@ function Syntopicon() {
   const filtered = useMemo(() => {
     const q = search.trim().toLowerCase();
     if (!q) return activeEntries;
-    return activeEntries.filter(
-      (e) =>
-        e.title.toLowerCase().includes(q) ||
-        e.notes.toLowerCase().includes(q) ||
-        e.source.toLowerCase().includes(q)
-    );
+    const refFields = Object.keys(REF_FIELD_COLUMNS);
+    return activeEntries.filter((e) => {
+      const haystack = [e.title, e.notes, e.source, ...refFields.map((f) => e[f])].join(" ").toLowerCase();
+      return haystack.includes(q);
+    });
   }, [activeEntries, search]);
 
   const byTheme = useMemo(() => {
@@ -696,6 +709,9 @@ function Syntopicon() {
             {saveState === "error" && "Erreur d'enregistrement, réessayez"}
           </div>
           <div className="syn-header-actions">
+            <button className="syn-btn syn-btn-sm" onClick={exportRis} title="Génère un fichier .ris importable dans Zotero, EndNote, etc.">
+              Exporter en RIS
+            </button>
             <button className="syn-btn syn-btn-sm" onClick={() => setShowTrash(true)}>
               Corbeille{trashEntries.length > 0 ? ` (${trashEntries.length})` : ""}
             </button>
@@ -757,8 +773,6 @@ function Syntopicon() {
               allThemes={data.themes}
               linkCounts={linkCounts}
               unlimited={Boolean(search.trim())}
-              expandedId={expandedId}
-              onToggleExpand={toggleExpand}
               onOpen={setEditing}
               onRename={renameTheme}
               onDelete={deleteTheme}
@@ -785,8 +799,6 @@ function Syntopicon() {
               allThemes={data.themes}
               linkCounts={linkCounts}
               unlimited={Boolean(search.trim())}
-              expandedId={expandedId}
-              onToggleExpand={toggleExpand}
               onOpen={setEditing}
               muted
               dragOver={dragOver === "none"}
@@ -916,10 +928,12 @@ function Syntopicon() {
 /* ---------- Colonne Kanban ---------- */
 const COLUMN_PAGE_SIZE = 20;
 
-function Column({ theme, entries, allThemes, linkCounts, unlimited, expandedId, onToggleExpand, onOpen, onRename, onDelete, muted, dragOver, onDragOver, onDragLeave, onDrop, onDragStart }) {
+function Column({ theme, entries, allThemes, linkCounts, unlimited, onOpen, onRename, onDelete, muted, dragOver, onDragOver, onDragLeave, onDrop, onDragStart }) {
   const [renaming, setRenaming] = useState(false);
   const [name, setName] = useState(theme.name);
   const [visibleCount, setVisibleCount] = useState(COLUMN_PAGE_SIZE);
+  const [expandedId, setExpandedId] = useState(null); // fiche dépliée, propre à cette colonne
+  const toggleExpand = (id) => setExpandedId((cur) => (cur === id ? null : id));
 
   const visibleEntries = unlimited ? entries : entries.slice(0, visibleCount);
   const remaining = entries.length - visibleEntries.length;
@@ -969,7 +983,7 @@ function Column({ theme, entries, allThemes, linkCounts, unlimited, expandedId, 
             className={"syn-card" + (expanded ? " syn-card-expanded" : "")}
             draggable
             onDragStart={() => onDragStart(e.id)}
-            onClick={() => onToggleExpand(e.id)}
+            onClick={() => toggleExpand(e.id)}
           >
             <div className="syn-card-title">
               {e.title}
@@ -1079,6 +1093,48 @@ function formatReference(e) {
   if (e.refIsbn) parts.push("ISBN " + e.refIsbn);
   if (e.refDoi) parts.push("DOI " + e.refDoi);
   return parts.join(", ");
+}
+
+/* ---------- Export RIS (Zotero, EndNote, etc.) ---------- */
+const RIS_TYPE_BY_REF_TYPE = {
+  livre: "BOOK",
+  article: "JOUR",
+  chapitre: "CHAP",
+  site_web: "ELEC",
+  autre: "GEN",
+};
+
+function buildRis(entries) {
+  const records = [];
+  entries.forEach((e) => {
+    if (!hasReference(e) && !e.source) return;
+    const title = e.refTitle || e.source || e.title;
+    const lines = [`TY  - ${RIS_TYPE_BY_REF_TYPE[e.refType] || "GEN"}`];
+    (e.refAuthors || "")
+      .split(";")
+      .map((a) => a.trim())
+      .filter(Boolean)
+      .forEach((a) => lines.push(`AU  - ${a}`));
+    if (title) lines.push(`TI  - ${title}`);
+    if (e.refContainer) lines.push(`T2  - ${e.refContainer}`);
+    if (e.refPublisher) lines.push(`PB  - ${e.refPublisher}`);
+    if (e.refYear) lines.push(`PY  - ${e.refYear}`);
+    if (e.refEdition) lines.push(`ET  - ${e.refEdition}`);
+    if (e.refPages) {
+      const [sp, ep] = e.refPages.split("-").map((p) => p.trim());
+      if (sp) lines.push(`SP  - ${sp}`);
+      if (ep) lines.push(`EP  - ${ep}`);
+    }
+    if (e.refIsbn) lines.push(`SN  - ${e.refIsbn}`);
+    if (e.refDoi) lines.push(`DO  - ${e.refDoi}`);
+    const noteParts = [];
+    if (e.title && e.title !== title) noteParts.push(`Idée Syntopicon : ${e.title}.`);
+    if (e.notes) noteParts.push(e.notes.replace(/\r?\n/g, " "));
+    if (noteParts.length) lines.push(`N1  - ${noteParts.join(" ")}`);
+    lines.push("ER  - ");
+    records.push(lines.join("\n"));
+  });
+  return records.join("\n\n");
 }
 
 function EntryModal({ themes, entries, links, entry, onClose, onSave, onDelete, onAddLink, onDeleteLink, onOpenEntry }) {
