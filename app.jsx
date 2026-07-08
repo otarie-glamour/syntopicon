@@ -45,6 +45,83 @@ function resolveEntryLinks(entryId, links, entries) {
     .filter(Boolean);
 }
 
+/* Palette pastel pour distinguer les thèmes (fond clair + texte assorti, contraste
+   ≥ 4,5:1 vérifié sur le fond pastel et sur le papier). Ordre fixe : chaque thème
+   garde la même couleur tant que sa position dans la liste ne change pas. */
+const THEME_COLORS = [
+  { bg: "#F1E2DA", text: "#905537" }, // argile
+  { bg: "#F1EFDA", text: "#6F692A" }, // ocre
+  { bg: "#E4F1DA", text: "#49732B" }, // mousse
+  { bg: "#DAEBF1", text: "#316D81" }, // sarcelle
+  { bg: "#DADEF1", text: "#4659B9" }, // bleu
+  { bg: "#E4DAF1", text: "#7646B9" }, // violet
+  { bg: "#F1DAF1", text: "#983A98" }, // prune
+  { bg: "#F1DAE4", text: "#A33E68" }, // mauve
+];
+
+/* Au-delà des 8 couleurs préréglées, une teinte est générée à la volée (angle d'or,
+   une technique classique pour répartir un nombre quelconque de teintes aussi loin
+   les unes des autres que possible sur le cercle chromatique), avec le même calcul
+   de contraste texte/fond que pour les 8 premières. Ainsi, chaque thème garde une
+   couleur qui lui est propre, quel que soit le nombre de thèmes créés. */
+const THEME_SURFACE = "#EDEFEA"; // papier
+const THEME_RESERVED_HUES = [163, 0]; // vert et filet, déjà utilisés ailleurs dans l'appli
+
+function hslToHex(h, s, l) {
+  h = ((h % 360) + 360) % 360;
+  const c = (1 - Math.abs(2 * l - 1)) * s;
+  const x = c * (1 - Math.abs(((h / 60) % 2) - 1));
+  const m = l - c / 2;
+  let rgb;
+  if (h < 60) rgb = [c, x, 0];
+  else if (h < 120) rgb = [x, c, 0];
+  else if (h < 180) rgb = [0, c, x];
+  else if (h < 240) rgb = [0, x, c];
+  else if (h < 300) rgb = [x, 0, c];
+  else rgb = [c, 0, x];
+  const toHex = (v) => Math.round((v + m) * 255).toString(16).padStart(2, "0");
+  return ("#" + rgb.map(toHex).join("")).toUpperCase();
+}
+
+function relLuminance(hex) {
+  const n = parseInt(hex.slice(1), 16);
+  const channels = [(n >> 16) & 255, (n >> 8) & 255, n & 255].map((c) => {
+    const s = c / 255;
+    return s <= 0.03928 ? s / 12.92 : Math.pow((s + 0.055) / 1.055, 2.4);
+  });
+  return 0.2126 * channels[0] + 0.7152 * channels[1] + 0.0722 * channels[2];
+}
+
+function contrastRatio(hex1, hex2) {
+  const l1 = relLuminance(hex1);
+  const l2 = relLuminance(hex2);
+  return (Math.max(l1, l2) + 0.05) / (Math.min(l1, l2) + 0.05);
+}
+
+function generateThemeColor(index) {
+  const GOLDEN_ANGLE = 137.508;
+  let hue = (40 + (index - THEME_COLORS.length) * GOLDEN_ANGLE) % 360;
+  hue = ((hue % 360) + 360) % 360;
+  THEME_RESERVED_HUES.forEach((reserved) => {
+    const d = Math.min(Math.abs(hue - reserved), 360 - Math.abs(hue - reserved));
+    if (d < 18) hue = (hue + 25) % 360;
+  });
+  const bg = hslToHex(hue, 0.45, 0.9);
+  let l = 0.5;
+  let text = hslToHex(hue, 0.45, l);
+  while ((contrastRatio(text, bg) < 4.6 || contrastRatio(text, THEME_SURFACE) < 4.6) && l > 0.1) {
+    l -= 0.01;
+    text = hslToHex(hue, 0.45, l);
+  }
+  return { bg, text };
+}
+
+function themeColor(themeId, allThemes) {
+  const idx = (allThemes || []).findIndex((t) => t.id === themeId);
+  const i = idx < 0 ? 0 : idx;
+  return i < THEME_COLORS.length ? THEME_COLORS[i] : generateThemeColor(i);
+}
+
 /* ---------- Suggestions de rapprochement (mots-clés communs, pondérés) ---------- */
 /* Mots structurels/grammaticaux : connecteurs logiques, pronoms, formes très
    courantes des verbes être/avoir/faire/pouvoir/devoir, adverbes courants.
@@ -991,13 +1068,16 @@ function Syntopicon() {
             {hiddenThemes.length === 0 && (
               <div className="syn-hidden-empty">Tous vos thèmes contiennent des entrées.</div>
             )}
-            {hiddenThemes.map((t) => (
-              <div key={t.id} className="syn-hidden-row">
-                <span className="syn-tag">{t.name}</span>
-                <span className="syn-count">0</span>
-                <button className="syn-x" title="Supprimer ce thème" onClick={() => deleteTheme(t.id)}>×</button>
-              </div>
-            ))}
+            {hiddenThemes.map((t) => {
+              const tc = themeColor(t.id, data.themes);
+              return (
+                <div key={t.id} className="syn-hidden-row">
+                  <span className="syn-tag" style={{ background: tc.bg, color: tc.text }}>{t.name}</span>
+                  <span className="syn-count">0</span>
+                  <button className="syn-x" title="Supprimer ce thème" onClick={() => deleteTheme(t.id)}>×</button>
+                </div>
+              );
+            })}
             {addingTheme ? (
               <div className="syn-hidden-add">
                 <input
@@ -1065,7 +1145,7 @@ function Syntopicon() {
             <h3>Répartition par thème</h3>
             {data.themes.map((t) => {
               const n = activeEntries.filter((e) => e.themeIds.includes(t.id)).length;
-              return <Bar key={t.id} label={t.name} n={n} max={maxCount} />;
+              return <Bar key={t.id} label={t.name} n={n} max={maxCount} color={themeColor(t.id, data.themes).text} />;
             })}
             <Bar label="Sans thème" n={activeEntries.filter((e) => e.themeIds.length === 0).length} max={maxCount} muted />
           </div>
@@ -1156,6 +1236,7 @@ function Column({ theme, entries, allThemes, allEntries, links, linkCounts, unli
 
   const visibleEntries = unlimited ? entries : entries.slice(0, visibleCount);
   const remaining = entries.length - visibleEntries.length;
+  const tc = muted ? null : themeColor(theme.id, allThemes);
 
   return (
     <div
@@ -1180,6 +1261,7 @@ function Column({ theme, entries, allThemes, allEntries, links, linkCounts, unli
         ) : (
           <span
             className="syn-col-name"
+            style={tc ? { background: tc.bg, color: tc.text } : undefined}
             onDoubleClick={() => onRename && setRenaming(true)}
             title={onRename ? "Double-clic pour renommer" : undefined}
           >
@@ -1193,8 +1275,8 @@ function Column({ theme, entries, allThemes, allEntries, links, linkCounts, unli
       </div>
       {visibleEntries.map((e) => {
         const expanded = expandedId === e.id;
-        const entryThemeNames = expanded
-          ? e.themeIds.map((tid) => allThemes.find((t) => t.id === tid)?.name).filter(Boolean)
+        const entryThemeTags = expanded
+          ? e.themeIds.map((tid) => allThemes.find((t) => t.id === tid)).filter(Boolean)
           : [];
         const entryCardLinks = expanded ? resolveEntryLinks(e.id, links, allEntries) : [];
         return (
@@ -1232,11 +1314,16 @@ function Column({ theme, entries, allThemes, allEntries, links, linkCounts, unli
             )}
             {expanded && (
               <>
-                {entryThemeNames.length > 0 && (
+                {entryThemeTags.length > 0 && (
                   <div className="syn-card-tags">
-                    {entryThemeNames.map((name) => (
-                      <span key={name} className="syn-tag">{name}</span>
-                    ))}
+                    {entryThemeTags.map((t) => {
+                      const tc = themeColor(t.id, allThemes);
+                      return (
+                        <span key={t.id} className="syn-tag" style={{ background: tc.bg, color: tc.text }}>
+                          {t.name}
+                        </span>
+                      );
+                    })}
                   </div>
                 )}
                 <div className="syn-card-meta">Idée du {formatCapturedDate(e.capturedAt)}</div>
@@ -1280,12 +1367,15 @@ function Column({ theme, entries, allThemes, allEntries, links, linkCounts, unli
 }
 
 /* ---------- Barre analytique ---------- */
-function Bar({ label, n, max, muted, wide }) {
+function Bar({ label, n, max, muted, wide, color }) {
   return (
     <div className={"syn-bar-row" + (wide ? " syn-bar-row-wide" : "")}>
       <span className={"syn-bar-label" + (muted ? " syn-bar-label-muted" : "")} title={label}>{label}</span>
       <div className="syn-bar-track">
-        <div className="syn-bar-fill" style={{ width: max ? Math.max(n / max * 100, n > 0 ? 4 : 0) + "%" : 0 }} />
+        <div
+          className="syn-bar-fill"
+          style={{ width: (max ? Math.max(n / max * 100, n > 0 ? 4 : 0) + "%" : 0), background: color || undefined }}
+        />
       </div>
       <span className="syn-count">{n}</span>
     </div>
@@ -1525,6 +1615,7 @@ function EntryModal({ themes, entries, links, entry, onClose, onSave, onDelete, 
             {themes.map((t) => (
               <label key={t.id} className="syn-theme-check">
                 <input type="checkbox" checked={themeIds.includes(t.id)} onChange={() => toggleTheme(t.id)} />
+                <span className="syn-theme-swatch" style={{ background: themeColor(t.id, themes).text }} />
                 {t.name}
               </label>
             ))}
@@ -1681,7 +1772,7 @@ function EntryModal({ themes, entries, links, entry, onClose, onSave, onDelete, 
 
 /* ---------- Visualisation (lecture seule) ---------- */
 function ViewModal({ entry, allThemes, allEntries, links, onClose, onOpenEntry, onEdit }) {
-  const themeNames = entry.themeIds.map((tid) => allThemes.find((t) => t.id === tid)?.name).filter(Boolean);
+  const themeTags = entry.themeIds.map((tid) => allThemes.find((t) => t.id === tid)).filter(Boolean);
   const entryLinks = resolveEntryLinks(entry.id, links, allEntries);
 
   return (
@@ -1689,11 +1780,16 @@ function ViewModal({ entry, allThemes, allEntries, links, onClose, onOpenEntry, 
       <div className="syn-modal" onClick={(e) => e.stopPropagation()}>
         <div className="syn-modal-rule" />
         <h3 className="syn-modal-title">{entry.title}</h3>
-        {themeNames.length > 0 && (
+        {themeTags.length > 0 && (
           <div className="syn-card-tags syn-view-tags">
-            {themeNames.map((name) => (
-              <span key={name} className="syn-tag">{name}</span>
-            ))}
+            {themeTags.map((t) => {
+              const tc = themeColor(t.id, allThemes);
+              return (
+                <span key={t.id} className="syn-tag" style={{ background: tc.bg, color: tc.text }}>
+                  {t.name}
+                </span>
+              );
+            })}
           </div>
         )}
         {entry.notes && <p className="syn-view-notes">{entry.notes}</p>}
@@ -1931,6 +2027,7 @@ const css = `
 .syn-theme-checks { display: flex; flex-wrap: wrap; gap: 6px 14px; max-height: 160px; overflow-y: auto; padding: 10px; border: 1px solid var(--ligne); border-radius: 4px; background: var(--papier); }
 .syn-theme-check { display: flex; align-items: center; gap: 6px; font-size: 13px; cursor: pointer; white-space: nowrap; }
 .syn-theme-check input { cursor: pointer; }
+.syn-theme-swatch { display: inline-block; width: 9px; height: 9px; border-radius: 50%; flex-shrink: 0; }
 .syn-theme-add { display: flex; gap: 6px; margin-top: 8px; }
 .syn-theme-add .syn-input { flex: 1; }
 .syn-ref-reuse { display: block; width: 100%; margin-bottom: 8px; cursor: pointer; }
