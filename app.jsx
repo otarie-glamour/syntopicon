@@ -9,35 +9,67 @@ const { useState, useEffect, useMemo } = React;
 */
 const sb = window.supabase.createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
 
-/* Charge themes/entries (+ leurs thèmes N-N)/imported_batches de l'utilisateur connecté. */
+/* Correspondance champ JS (camelCase) <-> colonne Supabase (snake_case) pour la référence bibliographique. */
+const REF_FIELD_COLUMNS = {
+  refType: "ref_type",
+  refAuthors: "ref_authors",
+  refTitle: "ref_title",
+  refContainer: "ref_container",
+  refPublisher: "ref_publisher",
+  refYear: "ref_year",
+  refEdition: "ref_edition",
+  refPages: "ref_pages",
+  refIsbn: "ref_isbn",
+  refDoi: "ref_doi",
+};
+const REF_COLUMNS = Object.values(REF_FIELD_COLUMNS);
+const REF_SELECT = REF_COLUMNS.join(",");
+const todayStr = () => new Date().toISOString().slice(0, 10);
+
+/* Charge themes/entries (+ leurs thèmes N-N et leurs liens)/imported_batches de l'utilisateur connecté. */
 async function fetchRemoteData(userId) {
-  const [{ data: themes, error: te }, { data: entries, error: ee }, { data: links, error: le }, { data: batches, error: be }] =
-    await Promise.all([
-      sb.from("themes").select("id,name").eq("owner_id", userId).order("name"),
-      sb
-        .from("entries")
-        .select("id,title,source,notes,created_at")
-        .eq("owner_id", userId)
-        .order("created_at", { ascending: false }),
-      sb.from("entry_themes").select("entry_id,theme_id").eq("owner_id", userId),
-      sb.from("imported_batches").select("id").eq("owner_id", userId),
-    ]);
-  if (te || ee || le || be) throw te || ee || le || be;
+  const [
+    { data: themes, error: te },
+    { data: entries, error: ee },
+    { data: themeLinks, error: tle },
+    { data: entryLinks, error: ele },
+    { data: batches, error: be },
+  ] = await Promise.all([
+    sb.from("themes").select("id,name").eq("owner_id", userId).order("name"),
+    sb
+      .from("entries")
+      .select(`id,title,source,notes,captured_at,${REF_SELECT},deleted_at,created_at`)
+      .eq("owner_id", userId)
+      .order("created_at", { ascending: false }),
+    sb.from("entry_themes").select("entry_id,theme_id").eq("owner_id", userId),
+    sb.from("entry_links").select("id,from_entry_id,to_entry_id,relation").eq("owner_id", userId),
+    sb.from("imported_batches").select("id").eq("owner_id", userId),
+  ]);
+  if (te || ee || tle || ele || be) throw te || ee || tle || ele || be;
   const themeIdsByEntry = {};
-  (links || []).forEach((l) => {
+  (themeLinks || []).forEach((l) => {
     if (!themeIdsByEntry[l.entry_id]) themeIdsByEntry[l.entry_id] = [];
     themeIdsByEntry[l.entry_id].push(l.theme_id);
   });
   return {
     themes: themes || [],
-    entries: (entries || []).map((e) => ({
-      id: e.id,
-      title: e.title,
-      themeIds: themeIdsByEntry[e.id] || [],
-      source: e.source || "",
-      notes: e.notes || "",
-      createdAt: new Date(e.created_at).getTime(),
-    })),
+    entries: (entries || []).map((e) => {
+      const entry = {
+        id: e.id,
+        title: e.title,
+        themeIds: themeIdsByEntry[e.id] || [],
+        source: e.source || "",
+        notes: e.notes || "",
+        capturedAt: e.captured_at || todayStr(),
+        deletedAt: e.deleted_at ? new Date(e.deleted_at).getTime() : null,
+        createdAt: new Date(e.created_at).getTime(),
+      };
+      Object.entries(REF_FIELD_COLUMNS).forEach(([jsField, column]) => {
+        entry[jsField] = e[column] || "";
+      });
+      return entry;
+    }),
+    links: (entryLinks || []).map((l) => ({ id: l.id, fromId: l.from_entry_id, toId: l.to_entry_id, relation: l.relation })),
     importedBatches: (batches || []).map((b) => b.id),
   };
 }
@@ -52,13 +84,20 @@ async function insertRows(userId, { themes = [], entries = [], batchIds = [] }) 
   }
   if (entries.length) {
     const { error } = await sb.from("entries").insert(
-      entries.map((e) => ({
-        id: e.id,
-        title: e.title,
-        source: e.source,
-        notes: e.notes,
-        owner_id: userId,
-      }))
+      entries.map((e) => {
+        const row = {
+          id: e.id,
+          title: e.title,
+          source: e.source,
+          notes: e.notes,
+          captured_at: e.capturedAt || todayStr(),
+          owner_id: userId,
+        };
+        Object.entries(REF_FIELD_COLUMNS).forEach(([jsField, column]) => {
+          row[column] = e[jsField] || "";
+        });
+        return row;
+      })
     );
     if (error) throw error;
     const links = [];
@@ -95,6 +134,7 @@ const SEED = {
     { id: "th_morale", name: "Morale" },
   ],
   entries: [],
+  links: [],
 };
 
 const uid = (p) => p + "_" + Math.random().toString(36).slice(2, 9);
@@ -168,6 +208,7 @@ function mergeImports(base) {
   let d = {
     themes: [...(base.themes || [])],
     entries: [...(base.entries || [])],
+    links: [...(base.links || [])],
     importedBatches: [...(base.importedBatches || [])],
   };
   const added = { themes: [], entries: [], batchIds: [] };
@@ -194,6 +235,18 @@ function mergeImports(base) {
         themeIds: linkedThemeId ? [linkedThemeId] : [],
         source: e.source,
         notes: e.notes,
+        capturedAt: todayStr(),
+        refType: "",
+        refAuthors: "",
+        refTitle: "",
+        refContainer: "",
+        refPublisher: "",
+        refYear: "",
+        refEdition: "",
+        refPages: "",
+        refIsbn: "",
+        refDoi: "",
+        deletedAt: null,
         createdAt: Date.now(),
       };
       d.entries.push(entry);
@@ -272,6 +325,8 @@ function Syntopicon() {
   const [dragId, setDragId] = useState(null);
   const [dragOver, setDragOver] = useState(null);
   const [search, setSearch] = useState("");
+  const [showTrash, setShowTrash] = useState(false);
+  const [expandedId, setExpandedId] = useState(null); // fiche dépliée sur le tableau
 
   /* ---------- authentification ---------- */
   useEffect(() => {
@@ -327,16 +382,26 @@ function Syntopicon() {
       themeIds: entry.themeIds || [],
       source: (entry.source || "").trim(),
       notes: (entry.notes || "").trim(),
+      capturedAt: entry.capturedAt || todayStr(),
+      deletedAt: null,
       createdAt: Date.now(),
     };
+    Object.keys(REF_FIELD_COLUMNS).forEach((jsField) => {
+      e[jsField] = (entry[jsField] || "").trim();
+    });
     setSaveState("saving");
-    const { error } = await sb.from("entries").insert({
+    const row = {
       id: e.id,
       title: e.title,
       source: e.source,
       notes: e.notes,
+      captured_at: e.capturedAt,
       owner_id: session.user.id,
+    };
+    Object.entries(REF_FIELD_COLUMNS).forEach(([jsField, column]) => {
+      row[column] = e[jsField];
     });
+    const { error } = await sb.from("entries").insert(row);
     if (error) {
       setSaveState("error");
       return;
@@ -360,6 +425,10 @@ function Syntopicon() {
     if ("title" in patch) dbPatch.title = patch.title;
     if ("source" in patch) dbPatch.source = patch.source;
     if ("notes" in patch) dbPatch.notes = patch.notes;
+    if ("capturedAt" in patch) dbPatch.captured_at = patch.capturedAt;
+    Object.entries(REF_FIELD_COLUMNS).forEach(([jsField, column]) => {
+      if (jsField in patch) dbPatch[column] = patch[jsField];
+    });
     if (Object.keys(dbPatch).length) {
       const { error } = await sb.from("entries").update(dbPatch).eq("id", id);
       if (error) {
@@ -387,16 +456,78 @@ function Syntopicon() {
     setSaveState("saved");
   };
 
+  /* Suppression douce : la fiche part à la corbeille, récupérable tant qu'on ne la vide pas. */
   const deleteEntry = async (id) => {
+    setSaveState("saving");
+    const deletedAtIso = new Date().toISOString();
+    const { error } = await sb.from("entries").update({ deleted_at: deletedAtIso }).eq("id", id);
+    if (error) {
+      setSaveState("error");
+      return;
+    }
+    setData((d) => ({
+      ...d,
+      entries: d.entries.map((e) => (e.id === id ? { ...e, deletedAt: new Date(deletedAtIso).getTime() } : e)),
+    }));
+    setSaveState("saved");
+    setEditing(null);
+  };
+
+  const restoreEntry = async (id) => {
+    setSaveState("saving");
+    const { error } = await sb.from("entries").update({ deleted_at: null }).eq("id", id);
+    if (error) {
+      setSaveState("error");
+      return;
+    }
+    setData((d) => ({ ...d, entries: d.entries.map((e) => (e.id === id ? { ...e, deletedAt: null } : e)) }));
+    setSaveState("saved");
+  };
+
+  /* Suppression définitive : irréversible, seulement possible depuis la corbeille. */
+  const purgeEntry = async (id) => {
     setSaveState("saving");
     const { error } = await sb.from("entries").delete().eq("id", id);
     if (error) {
       setSaveState("error");
       return;
     }
-    setData((d) => ({ ...d, entries: d.entries.filter((e) => e.id !== id) }));
+    setData((d) => ({
+      ...d,
+      entries: d.entries.filter((e) => e.id !== id),
+      links: d.links.filter((l) => l.fromId !== id && l.toId !== id),
+    }));
     setSaveState("saved");
-    setEditing(null);
+  };
+
+  const addLink = async (fromId, toId, relation) => {
+    const link = { id: uid("lk"), fromId, toId, relation };
+    setSaveState("saving");
+    const { error } = await sb.from("entry_links").insert({
+      id: link.id,
+      from_entry_id: fromId,
+      to_entry_id: toId,
+      relation,
+      owner_id: session.user.id,
+    });
+    if (error) {
+      if (error.code === "23505") window.alert("Ce lien existe déjà.");
+      setSaveState("error");
+      return;
+    }
+    setData((d) => ({ ...d, links: [...d.links, link] }));
+    setSaveState("saved");
+  };
+
+  const deleteLink = async (id) => {
+    setSaveState("saving");
+    const { error } = await sb.from("entry_links").delete().eq("id", id);
+    if (error) {
+      setSaveState("error");
+      return;
+    }
+    setData((d) => ({ ...d, links: d.links.filter((l) => l.id !== id) }));
+    setSaveState("saved");
   };
 
   const addTheme = async (name) => {
@@ -458,18 +589,32 @@ function Syntopicon() {
     setTimeout(() => setQuickFlash(false), 1500);
   };
 
+  const toggleExpand = (id) => setExpandedId((cur) => (cur === id ? null : id));
+
   /* ---------- dérivés ---------- */
+  const linkCounts = useMemo(() => {
+    const m = {};
+    if (!data) return m;
+    data.links.forEach((l) => {
+      m[l.fromId] = (m[l.fromId] || 0) + 1;
+      m[l.toId] = (m[l.toId] || 0) + 1;
+    });
+    return m;
+  }, [data]);
+
+  const activeEntries = useMemo(() => (data ? data.entries.filter((e) => !e.deletedAt) : []), [data]);
+  const trashEntries = useMemo(() => (data ? data.entries.filter((e) => e.deletedAt) : []), [data]);
+
   const filtered = useMemo(() => {
-    if (!data) return [];
     const q = search.trim().toLowerCase();
-    if (!q) return data.entries;
-    return data.entries.filter(
+    if (!q) return activeEntries;
+    return activeEntries.filter(
       (e) =>
         e.title.toLowerCase().includes(q) ||
         e.notes.toLowerCase().includes(q) ||
         e.source.toLowerCase().includes(q)
     );
-  }, [data, search]);
+  }, [activeEntries, search]);
 
   const byTheme = useMemo(() => {
     const map = { none: [] };
@@ -487,14 +632,13 @@ function Syntopicon() {
   const hiddenThemes = data ? data.themes.filter((t) => !byTheme[t.id]?.length) : [];
 
   const sources = useMemo(() => {
-    if (!data) return [];
     const m = {};
-    data.entries.forEach((e) => {
+    activeEntries.forEach((e) => {
       const s = e.source || "Sans source";
       m[s] = (m[s] || 0) + 1;
     });
     return Object.entries(m).sort((a, b) => b[1] - a[1]);
-  }, [data]);
+  }, [activeEntries]);
 
   /* ---------- rendu ---------- */
   if (session === undefined) {
@@ -528,11 +672,11 @@ function Syntopicon() {
     );
   }
 
-  const editingEntry = editing ? data.entries.find((e) => e.id === editing) : null;
+  const editingEntry = editing ? activeEntries.find((e) => e.id === editing) : null;
   const maxCount = Math.max(
     1,
-    ...data.themes.map((t) => data.entries.filter((e) => e.themeIds.includes(t.id)).length),
-    data.entries.filter((e) => e.themeIds.length === 0).length
+    ...data.themes.map((t) => activeEntries.filter((e) => e.themeIds.includes(t.id)).length),
+    activeEntries.filter((e) => e.themeIds.length === 0).length
   );
 
   return (
@@ -552,6 +696,9 @@ function Syntopicon() {
             {saveState === "error" && "Erreur d'enregistrement, réessayez"}
           </div>
           <div className="syn-header-actions">
+            <button className="syn-btn syn-btn-sm" onClick={() => setShowTrash(true)}>
+              Corbeille{trashEntries.length > 0 ? ` (${trashEntries.length})` : ""}
+            </button>
             <button className="syn-btn syn-btn-sm" onClick={() => sb.auth.signOut()}>
               Se déconnecter
             </button>
@@ -607,7 +754,11 @@ function Syntopicon() {
               key={t.id}
               theme={t}
               entries={byTheme[t.id]}
+              allThemes={data.themes}
+              linkCounts={linkCounts}
               unlimited={Boolean(search.trim())}
+              expandedId={expandedId}
+              onToggleExpand={toggleExpand}
               onOpen={setEditing}
               onRename={renameTheme}
               onDelete={deleteTheme}
@@ -616,7 +767,7 @@ function Syntopicon() {
               onDragLeave={() => setDragOver(null)}
               onDrop={() => {
                 if (dragId) {
-                  const dragged = data.entries.find((e) => e.id === dragId);
+                  const dragged = activeEntries.find((e) => e.id === dragId);
                   if (dragged && !dragged.themeIds.includes(t.id)) {
                     updateEntry(dragId, { themeIds: [...dragged.themeIds, t.id] });
                   }
@@ -631,7 +782,11 @@ function Syntopicon() {
             <Column
               theme={{ id: "none", name: "Sans thème" }}
               entries={byTheme.none}
+              allThemes={data.themes}
+              linkCounts={linkCounts}
               unlimited={Boolean(search.trim())}
+              expandedId={expandedId}
+              onToggleExpand={toggleExpand}
               onOpen={setEditing}
               muted
               dragOver={dragOver === "none"}
@@ -692,14 +847,14 @@ function Syntopicon() {
           <div className="syn-ana-block">
             <h3>Répartition par thème</h3>
             {data.themes.map((t) => {
-              const n = data.entries.filter((e) => e.themeIds.includes(t.id)).length;
+              const n = activeEntries.filter((e) => e.themeIds.includes(t.id)).length;
               return <Bar key={t.id} label={t.name} n={n} max={maxCount} />;
             })}
-            <Bar label="Sans thème" n={data.entries.filter((e) => e.themeIds.length === 0).length} max={maxCount} muted />
+            <Bar label="Sans thème" n={activeEntries.filter((e) => e.themeIds.length === 0).length} max={maxCount} muted />
           </div>
           <div className="syn-ana-block">
             <h3>Provenance des idées</h3>
-            {data.entries.length === 0 ? (
+            {activeEntries.length === 0 ? (
               <p className="syn-empty-text">Aucune entrée pour l'instant.</p>
             ) : (
               sources.map(([s, n]) => <Bar key={s} label={s} n={n} max={sources[0][1]} />)
@@ -733,11 +888,25 @@ function Syntopicon() {
       )}
       {editingEntry && (
         <EntryModal
+          key={editingEntry.id}
           themes={data.themes}
+          entries={activeEntries}
+          links={data.links}
           entry={editingEntry}
           onClose={() => setEditing(null)}
           onSave={(patch) => { updateEntry(editingEntry.id, patch); setEditing(null); }}
           onDelete={() => deleteEntry(editingEntry.id)}
+          onAddLink={addLink}
+          onDeleteLink={deleteLink}
+          onOpenEntry={setEditing}
+        />
+      )}
+      {showTrash && (
+        <TrashModal
+          entries={trashEntries}
+          onClose={() => setShowTrash(false)}
+          onRestore={restoreEntry}
+          onPurge={purgeEntry}
         />
       )}
     </div>
@@ -747,7 +916,7 @@ function Syntopicon() {
 /* ---------- Colonne Kanban ---------- */
 const COLUMN_PAGE_SIZE = 20;
 
-function Column({ theme, entries, unlimited, onOpen, onRename, onDelete, muted, dragOver, onDragOver, onDragLeave, onDrop, onDragStart }) {
+function Column({ theme, entries, allThemes, linkCounts, unlimited, expandedId, onToggleExpand, onOpen, onRename, onDelete, muted, dragOver, onDragOver, onDragLeave, onDrop, onDragStart }) {
   const [renaming, setRenaming] = useState(false);
   const [name, setName] = useState(theme.name);
   const [visibleCount, setVisibleCount] = useState(COLUMN_PAGE_SIZE);
@@ -789,19 +958,52 @@ function Column({ theme, entries, unlimited, onOpen, onRename, onDelete, muted, 
           <button className="syn-x" title="Supprimer le thème (les fiches deviennent sans thème)" onClick={() => onDelete(theme.id)}>×</button>
         )}
       </div>
-      {visibleEntries.map((e) => (
-        <div
-          key={e.id}
-          className="syn-card"
-          draggable
-          onDragStart={() => onDragStart(e.id)}
-          onClick={() => onOpen(e.id)}
-        >
-          <div className="syn-card-title">{e.title}</div>
-          {e.source && <div className="syn-card-source">{e.source}</div>}
-          {e.notes && <div className="syn-card-notes">{e.notes}</div>}
-        </div>
-      ))}
+      {visibleEntries.map((e) => {
+        const expanded = expandedId === e.id;
+        const entryThemeNames = expanded
+          ? e.themeIds.map((tid) => allThemes.find((t) => t.id === tid)?.name).filter(Boolean)
+          : [];
+        return (
+          <div
+            key={e.id}
+            className={"syn-card" + (expanded ? " syn-card-expanded" : "")}
+            draggable
+            onDragStart={() => onDragStart(e.id)}
+            onClick={() => onToggleExpand(e.id)}
+          >
+            <div className="syn-card-title">
+              {e.title}
+              {linkCounts[e.id] > 0 && (
+                <span className="syn-card-linkcount" title="Fiches liées">🔗 {linkCounts[e.id]}</span>
+              )}
+            </div>
+            {e.source && <div className="syn-card-source">{e.source}</div>}
+            {e.notes && (
+              <div className={"syn-card-notes" + (expanded ? " syn-card-notes-full" : "")}>{e.notes}</div>
+            )}
+            {expanded && (
+              <>
+                {entryThemeNames.length > 0 && (
+                  <div className="syn-card-tags">
+                    {entryThemeNames.map((name) => (
+                      <span key={name} className="syn-tag">{name}</span>
+                    ))}
+                  </div>
+                )}
+                <div className="syn-card-meta">Idée du {formatCapturedDate(e.capturedAt)}</div>
+                {hasReference(e) && <div className="syn-card-reference">{formatReference(e)}</div>}
+                <button
+                  type="button"
+                  className="syn-card-edit-btn"
+                  onClick={(ev) => { ev.stopPropagation(); onOpen(e.id); }}
+                >
+                  Modifier
+                </button>
+              </>
+            )}
+          </div>
+        );
+      })}
       {remaining > 0 && (
         <button className="syn-load-more" onClick={() => setVisibleCount(entries.length)}>
           Charger {remaining} de plus
@@ -825,19 +1027,126 @@ function Bar({ label, n, max, muted }) {
 }
 
 /* ---------- Modale d'entrée ---------- */
-function EntryModal({ themes, entry, onClose, onSave, onDelete }) {
+const RELATION_TYPES = [
+  { value: "repond_a", label: "répond à" },
+  { value: "prolonge", label: "prolonge" },
+  { value: "contredit", label: "contredit" },
+  { value: "lien", label: "est en lien avec" },
+];
+const RELATION_LABELS = Object.fromEntries(RELATION_TYPES.map((r) => [r.value, r.label]));
+
+const REF_TYPES = [
+  { value: "", label: "Non précisé" },
+  { value: "livre", label: "Livre" },
+  { value: "article", label: "Article" },
+  { value: "chapitre", label: "Chapitre d'ouvrage collectif" },
+  { value: "site_web", label: "Site web" },
+  { value: "autre", label: "Autre" },
+];
+const REF_FORM_FIELDS = [
+  { key: "authors", label: "Auteur(s)", placeholder: "Foucault, Michel" },
+  { key: "title", label: "Titre complet", placeholder: "Surveiller et Punir : Naissance de la prison" },
+  { key: "container", label: "Revue / ouvrage collectif", placeholder: "" },
+  { key: "publisher", label: "Éditeur", placeholder: "Gallimard" },
+  { key: "year", label: "Année", placeholder: "1975" },
+  { key: "edition", label: "Édition", placeholder: "2e éd." },
+  { key: "pages", label: "Page(s)", placeholder: "45-52" },
+  { key: "isbn", label: "ISBN", placeholder: "" },
+  { key: "doi", label: "DOI", placeholder: "" },
+];
+
+function formatCapturedDate(dateStr) {
+  if (!dateStr) return "";
+  const [y, m, d] = dateStr.split("-").map(Number);
+  return new Date(y, m - 1, d).toLocaleDateString("fr-FR", { day: "numeric", month: "long", year: "numeric" });
+}
+
+function hasReference(e) {
+  return Boolean(
+    e.refAuthors || e.refTitle || e.refContainer || e.refPublisher || e.refYear || e.refEdition || e.refPages || e.refIsbn || e.refDoi
+  );
+}
+
+function formatReference(e) {
+  const parts = [];
+  if (e.refAuthors) parts.push(e.refAuthors);
+  if (e.refTitle) parts.push(e.refTitle);
+  if (e.refContainer) parts.push(e.refContainer);
+  if (e.refPublisher) parts.push(e.refPublisher);
+  if (e.refEdition) parts.push(e.refEdition);
+  if (e.refYear) parts.push(e.refYear);
+  if (e.refPages) parts.push("p. " + e.refPages);
+  if (e.refIsbn) parts.push("ISBN " + e.refIsbn);
+  if (e.refDoi) parts.push("DOI " + e.refDoi);
+  return parts.join(", ");
+}
+
+function EntryModal({ themes, entries, links, entry, onClose, onSave, onDelete, onAddLink, onDeleteLink, onOpenEntry }) {
   const [title, setTitle] = useState(entry ? entry.title : "");
   const [themeIds, setThemeIds] = useState(entry ? entry.themeIds || [] : []);
   const [source, setSource] = useState(entry ? entry.source : "");
   const [notes, setNotes] = useState(entry ? entry.notes : "");
+  const [capturedAt, setCapturedAt] = useState(entry ? entry.capturedAt : todayStr());
+  const [ref, setRef] = useState({
+    type: entry ? entry.refType : "",
+    authors: entry ? entry.refAuthors : "",
+    title: entry ? entry.refTitle : "",
+    container: entry ? entry.refContainer : "",
+    publisher: entry ? entry.refPublisher : "",
+    year: entry ? entry.refYear : "",
+    edition: entry ? entry.refEdition : "",
+    pages: entry ? entry.refPages : "",
+    isbn: entry ? entry.refIsbn : "",
+    doi: entry ? entry.refDoi : "",
+  });
+  const [showBiblio, setShowBiblio] = useState(entry ? Object.values(ref).some(Boolean) : false);
+  const [linkRelation, setLinkRelation] = useState(RELATION_TYPES[0].value);
+  const [linkQuery, setLinkQuery] = useState("");
 
   const toggleTheme = (id) => {
     setThemeIds((ids) => (ids.includes(id) ? ids.filter((tid) => tid !== id) : [...ids, id]));
   };
 
+  const updateRef = (key, value) => setRef((r) => ({ ...r, [key]: value }));
+
   const save = () => {
     if (!title.trim()) return;
-    onSave({ title: title.trim(), themeIds, source, notes });
+    onSave({
+      title: title.trim(),
+      themeIds,
+      source,
+      notes,
+      capturedAt,
+      refType: ref.type,
+      refAuthors: ref.authors,
+      refTitle: ref.title,
+      refContainer: ref.container,
+      refPublisher: ref.publisher,
+      refYear: ref.year,
+      refEdition: ref.edition,
+      refPages: ref.pages,
+      refIsbn: ref.isbn,
+      refDoi: ref.doi,
+    });
+  };
+
+  const entryLinks = entry
+    ? (links || [])
+        .filter((l) => l.fromId === entry.id || l.toId === entry.id)
+        .map((l) => {
+          const outgoing = l.fromId === entry.id;
+          const other = (entries || []).find((e) => e.id === (outgoing ? l.toId : l.fromId));
+          return other ? { id: l.id, relation: l.relation, outgoing, other } : null;
+        })
+        .filter(Boolean)
+    : [];
+
+  const otherEntries = entry ? (entries || []).filter((e) => e.id !== entry.id) : [];
+  const linkTarget = otherEntries.find((e) => e.title === linkQuery);
+  const addLinkClick = () => {
+    if (!linkTarget) return;
+    onAddLink(entry.id, linkTarget.id, linkRelation);
+    setLinkQuery("");
   };
 
   return (
@@ -848,6 +1157,10 @@ function EntryModal({ themes, entry, onClose, onSave, onDelete }) {
         <label className="syn-field">
           <span>Titre</span>
           <input autoFocus className="syn-input" value={title} onChange={(e) => setTitle(e.target.value)} placeholder="La lettre de Pascal sur l'art d'écrire court" />
+        </label>
+        <label className="syn-field">
+          <span>Date de capture (l'idée, pas la saisie)</span>
+          <input type="date" className="syn-input" value={capturedAt} onChange={(e) => setCapturedAt(e.target.value)} />
         </label>
         <div className="syn-field">
           <span>Thèmes syntopiques (un ou plusieurs)</span>
@@ -865,19 +1178,134 @@ function EntryModal({ themes, entry, onClose, onSave, onDelete }) {
           <span>Source (livre, article, cours...)</span>
           <input className="syn-input" value={source} onChange={(e) => setSource(e.target.value)} placeholder="Pascal, Lettres provinciales, XVI" />
         </label>
+        <div className="syn-field">
+          <button type="button" className="syn-biblio-toggle" onClick={() => setShowBiblio((s) => !s)}>
+            {showBiblio ? "▾" : "▸"} Référence bibliographique complète (pour export futur, Zotero...)
+          </button>
+          {showBiblio && (
+            <div className="syn-biblio-grid">
+              <label className="syn-biblio-field">
+                <span>Type</span>
+                <select className="syn-input syn-input-sm" value={ref.type} onChange={(e) => updateRef("type", e.target.value)}>
+                  {REF_TYPES.map((t) => (
+                    <option key={t.value} value={t.value}>{t.label}</option>
+                  ))}
+                </select>
+              </label>
+              {REF_FORM_FIELDS.map((f) => (
+                <label key={f.key} className="syn-biblio-field">
+                  <span>{f.label}</span>
+                  <input
+                    className="syn-input syn-input-sm"
+                    value={ref[f.key]}
+                    onChange={(e) => updateRef(f.key, e.target.value)}
+                    placeholder={f.placeholder}
+                  />
+                </label>
+              ))}
+            </div>
+          )}
+        </div>
         <label className="syn-field">
           <span>Annotations</span>
           <textarea className="syn-textarea" rows={5} value={notes} onChange={(e) => setNotes(e.target.value)} placeholder="Votre lecture, vos objections, vos rapprochements..." />
         </label>
+        {entry && (
+          <div className="syn-field">
+            <span>Fiches liées</span>
+            <div className="syn-links-list">
+              {entryLinks.length === 0 && <p className="syn-empty-text">Aucun lien pour l'instant.</p>}
+              {entryLinks.map((l) => (
+                <div key={l.id} className="syn-link-row">
+                  <span
+                    className="syn-link-arrow"
+                    title={l.outgoing ? "Cette fiche → l'autre fiche" : "L'autre fiche → cette fiche"}
+                  >
+                    {l.outgoing ? "→" : "←"}
+                  </span>
+                  <span className="syn-link-relation">{RELATION_LABELS[l.relation] || l.relation}</span>
+                  <button type="button" className="syn-link-title" onClick={() => onOpenEntry(l.other.id)}>
+                    {l.other.title}
+                  </button>
+                  <button type="button" className="syn-x" title="Retirer ce lien" onClick={() => onDeleteLink(l.id)}>×</button>
+                </div>
+              ))}
+            </div>
+            <div className="syn-link-add">
+              <select className="syn-input syn-input-sm" value={linkRelation} onChange={(e) => setLinkRelation(e.target.value)}>
+                {RELATION_TYPES.map((r) => (
+                  <option key={r.value} value={r.value}>{r.label}</option>
+                ))}
+              </select>
+              <input
+                className="syn-input"
+                list="syn-entry-titles"
+                placeholder="Titre de la fiche à lier..."
+                value={linkQuery}
+                onChange={(e) => setLinkQuery(e.target.value)}
+              />
+              <datalist id="syn-entry-titles">
+                {otherEntries.map((e) => <option key={e.id} value={e.title} />)}
+              </datalist>
+              <button type="button" className="syn-btn syn-btn-sm" disabled={!linkTarget} onClick={addLinkClick}>
+                Lier
+              </button>
+            </div>
+          </div>
+        )}
         <div className="syn-modal-actions">
           {onDelete && (
-            <button className="syn-btn syn-btn-danger" onClick={onDelete}>Supprimer</button>
+            <button className="syn-btn syn-btn-danger" onClick={onDelete} title="Récupérable ensuite dans la corbeille">
+              Mettre à la corbeille
+            </button>
           )}
           <div className="syn-spacer" />
           <button className="syn-btn" onClick={onClose}>Annuler</button>
           <button className="syn-btn syn-btn-primary" onClick={save} disabled={!title.trim()}>
             Enregistrer
           </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+/* ---------- Corbeille ---------- */
+function TrashModal({ entries, onClose, onRestore, onPurge }) {
+  const purge = (e) => {
+    if (window.confirm(`Supprimer définitivement « ${e.title} » ? Cette action est irréversible.`)) {
+      onPurge(e.id);
+    }
+  };
+
+  return (
+    <div className="syn-overlay" onClick={onClose}>
+      <div className="syn-modal" onClick={(e) => e.stopPropagation()}>
+        <div className="syn-modal-rule" />
+        <h3 className="syn-modal-title">Corbeille</h3>
+        {entries.length === 0 ? (
+          <p className="syn-empty-text">La corbeille est vide.</p>
+        ) : (
+          <div className="syn-trash-list">
+            {entries.map((e) => (
+              <div key={e.id} className="syn-trash-row">
+                <div className="syn-trash-info">
+                  <div className="syn-trash-title">{e.title}</div>
+                  {e.source && <div className="syn-card-source">{e.source}</div>}
+                </div>
+                <div className="syn-trash-actions">
+                  <button className="syn-btn syn-btn-sm" onClick={() => onRestore(e.id)}>Restaurer</button>
+                  <button className="syn-btn syn-btn-sm syn-btn-danger" onClick={() => purge(e)}>
+                    Supprimer définitivement
+                  </button>
+                </div>
+              </div>
+            ))}
+          </div>
+        )}
+        <div className="syn-modal-actions">
+          <div className="syn-spacer" />
+          <button className="syn-btn" onClick={onClose}>Fermer</button>
         </div>
       </div>
     </div>
@@ -941,14 +1369,23 @@ const css = `
 .syn-count { font-family: 'IBM Plex Mono', monospace; font-size: 12px; color: var(--encre-2); }
 .syn-x { margin-left: auto; border: none; background: none; color: var(--encre-2); font-size: 16px; cursor: pointer; line-height: 1; padding: 2px 4px; border-radius: 3px; opacity: 0; transition: opacity 0.15s; }
 .syn-col-head:hover .syn-x, .syn-hidden-row:hover .syn-x { opacity: 1; }
+.syn-link-row .syn-x { opacity: 1; }
 .syn-x:hover { color: var(--filet); }
 
 /* fiches : le filet rouge sous le titre est la signature visuelle */
 .syn-card { background: var(--fiche); border: 1px solid var(--ligne); border-radius: 4px; padding: 12px 14px 10px; margin-bottom: 10px; cursor: pointer; box-shadow: 0 1px 2px rgba(34,48,63,0.06); transition: transform 0.12s, box-shadow 0.12s; }
 .syn-card:hover { transform: translateY(-1px); box-shadow: 0 3px 8px rgba(34,48,63,0.10); }
-.syn-card-title { font-weight: 500; padding-bottom: 7px; border-bottom: 1px solid var(--filet); margin-bottom: 7px; }
+.syn-card-expanded, .syn-card-expanded:hover { border-color: var(--vert); }
+.syn-card-title { font-weight: 500; padding-bottom: 7px; border-bottom: 1px solid var(--filet); margin-bottom: 7px; display: flex; align-items: baseline; justify-content: space-between; gap: 8px; }
+.syn-card-linkcount { font-family: 'IBM Plex Mono', monospace; font-size: 10.5px; color: var(--encre-2); font-weight: 400; white-space: nowrap; }
 .syn-card-source { font-family: 'IBM Plex Mono', monospace; font-size: 11px; color: var(--vert); margin-bottom: 4px; }
 .syn-card-notes { font-size: 12.5px; color: var(--encre-2); display: -webkit-box; -webkit-line-clamp: 3; -webkit-box-orient: vertical; overflow: hidden; }
+.syn-card-notes-full { display: block; -webkit-line-clamp: unset; white-space: pre-wrap; }
+.syn-card-tags { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 10px; }
+.syn-card-meta { font-family: 'IBM Plex Mono', monospace; font-size: 11px; color: var(--encre-2); margin-top: 8px; }
+.syn-card-reference { font-size: 11.5px; color: var(--encre-2); font-style: italic; margin-top: 4px; }
+.syn-card-edit-btn { display: block; border: none; background: none; color: var(--vert); font: inherit; font-size: 12.5px; font-weight: 600; cursor: pointer; padding: 10px 0 0; }
+.syn-card-edit-btn:hover { text-decoration: underline; }
 .syn-load-more { display: block; width: 100%; border: 1px dashed var(--ligne); background: none; color: var(--encre-2); font: inherit; font-size: 12.5px; padding: 8px; border-radius: 4px; cursor: pointer; margin-top: 2px; margin-bottom: 10px; transition: border-color 0.12s, color 0.12s; }
 .syn-load-more:hover { border-color: var(--vert); color: var(--vert); }
 
@@ -999,6 +1436,23 @@ const css = `
 .syn-theme-checks { display: flex; flex-wrap: wrap; gap: 6px 14px; max-height: 160px; overflow-y: auto; padding: 10px; border: 1px solid var(--ligne); border-radius: 4px; background: var(--papier); }
 .syn-theme-check { display: flex; align-items: center; gap: 6px; font-size: 13px; cursor: pointer; white-space: nowrap; }
 .syn-theme-check input { cursor: pointer; }
+.syn-biblio-toggle { display: block; width: 100%; text-align: left; border: none; background: none; color: var(--vert); font: inherit; font-size: 12px; font-weight: 600; letter-spacing: 0.02em; cursor: pointer; padding: 0 0 5px; }
+.syn-biblio-toggle:hover { text-decoration: underline; }
+.syn-biblio-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 10px 12px; padding: 10px; border: 1px solid var(--ligne); border-radius: 4px; background: var(--papier); }
+.syn-biblio-field { display: block; }
+.syn-biblio-field > span { display: block; font-size: 11px; font-weight: 600; color: var(--encre-2); margin-bottom: 3px; }
+.syn-links-list { display: flex; flex-direction: column; gap: 6px; margin-bottom: 8px; }
+.syn-link-row { display: flex; align-items: center; gap: 8px; font-size: 13px; }
+.syn-link-arrow { color: var(--vert); font-weight: 600; cursor: help; }
+.syn-link-relation { color: var(--encre-2); font-size: 12px; white-space: nowrap; }
+.syn-link-title { flex: 1; text-align: left; border: none; background: none; color: var(--encre); font: inherit; font-weight: 500; cursor: pointer; padding: 2px 0; text-decoration: underline; text-decoration-color: var(--ligne); }
+.syn-link-title:hover { text-decoration-color: var(--vert); color: var(--vert); }
+.syn-link-add { display: flex; gap: 6px; }
+.syn-link-add .syn-input { flex: 1; }
+.syn-trash-list { display: flex; flex-direction: column; gap: 10px; max-height: 50vh; overflow-y: auto; }
+.syn-trash-row { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 10px 12px; border: 1px solid var(--ligne); border-radius: 4px; }
+.syn-trash-title { font-weight: 500; }
+.syn-trash-actions { display: flex; gap: 8px; flex-shrink: 0; }
 .syn-modal-actions { display: flex; gap: 10px; align-items: center; margin-top: 20px; }
 .syn-spacer { flex: 1; }
 

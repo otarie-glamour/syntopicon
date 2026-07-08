@@ -16,6 +16,21 @@ create table if not exists entries (
   title text not null,
   source text not null default '',
   notes text not null default '',
+  -- Date de l'idée/lecture elle-même (éditable, distincte de created_at qui
+  -- est la date d'enregistrement technique dans l'outil).
+  captured_at date not null default current_date,
+  -- Référence bibliographique complète, en vue d'un futur export (Zotero...).
+  ref_type text not null default '',
+  ref_authors text not null default '',
+  ref_title text not null default '',
+  ref_container text not null default '',
+  ref_publisher text not null default '',
+  ref_year text not null default '',
+  ref_edition text not null default '',
+  ref_pages text not null default '',
+  ref_isbn text not null default '',
+  ref_doi text not null default '',
+  deleted_at timestamptz,
   owner_id uuid not null,
   created_at timestamptz not null default now()
 );
@@ -28,6 +43,18 @@ create table if not exists entry_themes (
   primary key (entry_id, theme_id)
 );
 
+-- Lien dirigé et typé entre deux fiches (ex : A "répond à" B), indépendant des thèmes.
+create table if not exists entry_links (
+  id text primary key,
+  from_entry_id text not null references entries(id) on delete cascade,
+  to_entry_id text not null references entries(id) on delete cascade,
+  relation text not null default 'lien',
+  owner_id uuid not null,
+  created_at timestamptz not null default now(),
+  constraint entry_links_no_self check (from_entry_id <> to_entry_id),
+  constraint entry_links_unique unique (from_entry_id, to_entry_id, relation)
+);
+
 create table if not exists imported_batches (
   id text primary key,
   owner_id uuid not null,
@@ -37,6 +64,7 @@ create table if not exists imported_batches (
 alter table themes enable row level security;
 alter table entries enable row level security;
 alter table entry_themes enable row level security;
+alter table entry_links enable row level security;
 alter table imported_batches enable row level security;
 
 -- Chaque ligne n'est lisible/modifiable que par son propriétaire (owner_id = votre utilisateur connecté).
@@ -51,6 +79,9 @@ create policy "owner_all_entries" on entries
 create policy "owner_all_entry_themes" on entry_themes
   for all using (owner_id = auth.uid()) with check (owner_id = auth.uid());
 
+create policy "owner_all_entry_links" on entry_links
+  for all using (owner_id = auth.uid()) with check (owner_id = auth.uid());
+
 create policy "owner_all_imported_batches" on imported_batches
   for all using (owner_id = auth.uid()) with check (owner_id = auth.uid());
 
@@ -62,4 +93,5 @@ grant usage on schema public to authenticated;
 grant select, insert, update, delete on themes to authenticated;
 grant select, insert, update, delete on entries to authenticated;
 grant select, insert, update, delete on entry_themes to authenticated;
+grant select, insert, update, delete on entry_links to authenticated;
 grant select, insert, update, delete on imported_batches to authenticated;
