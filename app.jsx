@@ -840,6 +840,17 @@ function Syntopicon() {
   const activeEntries = useMemo(() => (data ? data.entries.filter((e) => !e.deletedAt) : []), [data]);
   const trashEntries = useMemo(() => (data ? data.entries.filter((e) => e.deletedAt) : []), [data]);
 
+  /* Une fiche différente mise en avant chaque jour, pour la relire sans la chercher.
+     Choix déterministe (par id trié, indexé par le jour courant) : stable toute la
+     journée, identique sur tous vos appareils, et parcourt l'ensemble de vos fiches
+     au fil du temps plutôt que de retomber au hasard toujours sur les mêmes. */
+  const entryOfDay = useMemo(() => {
+    if (!activeEntries.length) return null;
+    const sorted = [...activeEntries].sort((a, b) => a.id.localeCompare(b.id));
+    const dayIndex = Math.floor(Date.now() / 86400000) % sorted.length;
+    return sorted[dayIndex];
+  }, [activeEntries]);
+
   const suggestions = useMemo(() => {
     if (!data) return [];
     return computeSuggestions(activeEntries, data.links, data.dismissedSuggestions, 12);
@@ -982,6 +993,17 @@ function Syntopicon() {
           <button className="syn-btn" onClick={quickCapture} disabled={!quickText.trim()}>
             Capturer
           </button>
+        </div>
+        <div className="syn-panel syn-daily">
+          <div className="syn-panel-label">📖 Fiche du jour</div>
+          {entryOfDay ? (
+            <button type="button" className="syn-daily-card" onClick={() => setViewing(entryOfDay.id)}>
+              <div className="syn-daily-title">{entryOfDay.title}</div>
+              {entryOfDay.notes && <div className="syn-daily-notes">{entryOfDay.notes}</div>}
+            </button>
+          ) : (
+            <p className="syn-empty-text">Aucune fiche à relire pour l'instant.</p>
+          )}
         </div>
       </section>
 
@@ -1904,12 +1926,18 @@ const css = `
 .syn-save[data-state="error"] { color: var(--filet); }
 
 /* ----- capture ----- */
-.syn-capture-row { display: grid; grid-template-columns: minmax(220px, 1fr) minmax(280px, 1.6fr); gap: 16px; margin-bottom: 40px; }
-@media (max-width: 720px) { .syn-capture-row { grid-template-columns: 1fr; } }
+.syn-capture-row { display: grid; grid-template-columns: minmax(200px, 0.9fr) minmax(220px, 1fr) minmax(240px, 1.1fr); gap: 16px; margin-bottom: 40px; }
+@media (max-width: 900px) { .syn-capture-row { grid-template-columns: 1fr 1fr; } }
+@media (max-width: 600px) { .syn-capture-row { grid-template-columns: 1fr; } }
 .syn-panel { background: var(--fiche); border: 1px solid var(--ligne); border-radius: 6px; padding: 18px; display: flex; flex-direction: column; gap: 12px; align-items: flex-start; }
 .syn-panel-label { font-weight: 600; font-size: 14px; display: flex; gap: 10px; align-items: baseline; }
 .syn-flash { font-family: 'IBM Plex Mono', monospace; font-size: 11px; color: var(--vert); font-weight: 400; }
 .syn-quick .syn-textarea { width: 100%; }
+.syn-daily { width: 100%; }
+.syn-daily-card { display: block; width: 100%; text-align: left; border: 1px solid var(--ligne); border-radius: 4px; padding: 10px 12px; background: var(--papier); cursor: pointer; font: inherit; color: inherit; transition: border-color 0.12s; }
+.syn-daily-card:hover { border-color: var(--vert); }
+.syn-daily-title { font-weight: 500; padding-bottom: 6px; border-bottom: 1px solid var(--filet); margin-bottom: 6px; }
+.syn-daily-notes { font-size: 12.5px; color: var(--encre-2); display: -webkit-box; -webkit-line-clamp: 4; -webkit-box-orient: vertical; overflow: hidden; }
 
 /* ----- sections ----- */
 .syn-section-head { display: flex; align-items: baseline; gap: 14px; flex-wrap: wrap; border-bottom: 1px solid var(--encre); padding-bottom: 10px; margin-bottom: 20px; }
