@@ -840,15 +840,16 @@ function Syntopicon() {
   const activeEntries = useMemo(() => (data ? data.entries.filter((e) => !e.deletedAt) : []), [data]);
   const trashEntries = useMemo(() => (data ? data.entries.filter((e) => e.deletedAt) : []), [data]);
 
-  /* Une fiche différente mise en avant chaque jour, pour la relire sans la chercher.
-     Choix déterministe (par id trié, indexé par le jour courant) : stable toute la
-     journée, identique sur tous vos appareils, et parcourt l'ensemble de vos fiches
+  /* Une fiche différente mise en avant toutes les 4 heures, pour la relire sans la chercher.
+     Choix déterministe (par id trié, indexé par la période courante) : stable pendant
+     4 heures, identique sur tous vos appareils, et parcourt l'ensemble de vos fiches
      au fil du temps plutôt que de retomber au hasard toujours sur les mêmes. */
   const entryOfDay = useMemo(() => {
     if (!activeEntries.length) return null;
     const sorted = [...activeEntries].sort((a, b) => a.id.localeCompare(b.id));
-    const dayIndex = Math.floor(Date.now() / 86400000) % sorted.length;
-    return sorted[dayIndex];
+    const rotationPeriodMs = 4 * 60 * 60 * 1000;
+    const periodIndex = Math.floor(Date.now() / rotationPeriodMs) % sorted.length;
+    return sorted[periodIndex];
   }, [activeEntries]);
 
   const suggestions = useMemo(() => {
