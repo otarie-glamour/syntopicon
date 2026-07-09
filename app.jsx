@@ -22,13 +22,18 @@ const REF_FIELD_COLUMNS = {
   refIsbn: "ref_isbn",
   refDoi: "ref_doi",
 };
+const SECONDARY_REF_FIELD_COLUMNS = {
+  secondaryReference: "secondary_reference",
+};
 const REF_COLUMNS = Object.values(REF_FIELD_COLUMNS);
 const REF_SELECT = REF_COLUMNS.join(",");
+const SECONDARY_REF_COLUMNS = Object.values(SECONDARY_REF_FIELD_COLUMNS);
+const SECONDARY_REF_SELECT = SECONDARY_REF_COLUMNS.join(",");
 const todayStr = () => new Date().toISOString().slice(0, 10);
 
 /* Texte de recherche d'une fiche : titre, notes, réflexion et toute la référence bibliographique. */
 function searchHaystack(e) {
-  return [e.title, e.notes, e.reflection, ...Object.keys(REF_FIELD_COLUMNS).map((f) => e[f])]
+  return [e.title, e.notes, e.reflection, ...Object.keys(REF_FIELD_COLUMNS).map((f) => e[f]), ...Object.keys(SECONDARY_REF_FIELD_COLUMNS).map((f) => e[f])]
     .join(" ")
     .toLowerCase();
 }
@@ -229,7 +234,7 @@ async function fetchRemoteData(userId) {
     sb.from("themes").select("id,name").eq("owner_id", userId).order("name"),
     sb
       .from("entries")
-      .select(`id,title,notes,reflection,captured_at,${REF_SELECT},deleted_at,created_at`)
+      .select(`id,title,notes,reflection,captured_at,${REF_SELECT},${SECONDARY_REF_SELECT},deleted_at,created_at`)
       .eq("owner_id", userId)
       .order("created_at", { ascending: false }),
     sb.from("entry_themes").select("entry_id,theme_id").eq("owner_id", userId),
@@ -257,6 +262,9 @@ async function fetchRemoteData(userId) {
         createdAt: new Date(e.created_at).getTime(),
       };
       Object.entries(REF_FIELD_COLUMNS).forEach(([jsField, column]) => {
+        entry[jsField] = e[column] || "";
+      });
+      Object.entries(SECONDARY_REF_FIELD_COLUMNS).forEach(([jsField, column]) => {
         entry[jsField] = e[column] || "";
       });
       return entry;
@@ -287,6 +295,9 @@ async function insertRows(userId, { themes = [], entries = [], batchIds = [] }) 
           owner_id: userId,
         };
         Object.entries(REF_FIELD_COLUMNS).forEach(([jsField, column]) => {
+          row[column] = e[jsField] || "";
+        });
+        Object.entries(SECONDARY_REF_FIELD_COLUMNS).forEach(([jsField, column]) => {
           row[column] = e[jsField] || "";
         });
         return row;
@@ -434,6 +445,7 @@ function mergeImports(base) {
         refPages: "",
         refIsbn: "",
         refDoi: "",
+        secondaryReference: "",
         deletedAt: null,
         createdAt: Date.now(),
       };
@@ -591,6 +603,9 @@ function Syntopicon() {
     Object.keys(REF_FIELD_COLUMNS).forEach((jsField) => {
       e[jsField] = (entry[jsField] || "").trim();
     });
+    Object.keys(SECONDARY_REF_FIELD_COLUMNS).forEach((jsField) => {
+      e[jsField] = (entry[jsField] || "").trim();
+    });
     setSaveState("saving");
     const row = {
       id: e.id,
@@ -601,6 +616,9 @@ function Syntopicon() {
       owner_id: session.user.id,
     };
     Object.entries(REF_FIELD_COLUMNS).forEach(([jsField, column]) => {
+      row[column] = e[jsField];
+    });
+    Object.entries(SECONDARY_REF_FIELD_COLUMNS).forEach(([jsField, column]) => {
       row[column] = e[jsField];
     });
     const { error } = await sb.from("entries").insert(row);
@@ -629,6 +647,9 @@ function Syntopicon() {
     if ("reflection" in patch) dbPatch.reflection = patch.reflection;
     if ("capturedAt" in patch) dbPatch.captured_at = patch.capturedAt;
     Object.entries(REF_FIELD_COLUMNS).forEach(([jsField, column]) => {
+      if (jsField in patch) dbPatch[column] = patch[jsField];
+    });
+    Object.entries(SECONDARY_REF_FIELD_COLUMNS).forEach(([jsField, column]) => {
       if (jsField in patch) dbPatch[column] = patch[jsField];
     });
     if (Object.keys(dbPatch).length) {
@@ -1321,9 +1342,14 @@ function Column({ theme, entries, allThemes, allEntries, links, linkCounts, unli
                 )}
               </span>
             </div>
-            {hasReference(e) && (
-              <div className={"syn-card-reference" + (expanded ? "" : " syn-card-reference-clamp")}>
-                {formatReference(e)}
+            {(hasReference(e) || hasSecondaryReference(e)) && (
+              <div className="syn-card-reference-block">
+                {hasReference(e) && (
+                  <div className={"syn-card-reference" + (expanded ? "" : " syn-card-reference-clamp")}>
+                    {formatReference(e)}
+                  </div>
+                )}
+                {hasSecondaryReference(e) && <div className="syn-card-reference-secondary">↳ {e.secondaryReference}</div>}
               </div>
             )}
             {e.notes && (
@@ -1446,6 +1472,10 @@ function hasReference(e) {
   );
 }
 
+function hasSecondaryReference(e) {
+  return Boolean(e.secondaryReference && String(e.secondaryReference).trim());
+}
+
 function formatReference(e) {
   const parts = [];
   if (e.refAuthors) parts.push(e.refAuthors);
@@ -1521,6 +1551,7 @@ function EntryModal({ themes, entries, links, entry, onClose, onSave, onDelete, 
     isbn: entry ? entry.refIsbn : "",
     doi: entry ? entry.refDoi : "",
   });
+  const [secondaryReference, setSecondaryReference] = useState(entry ? entry.secondaryReference : "");
   const [showBiblio, setShowBiblio] = useState(entry ? Object.values(ref).some(Boolean) : false);
   const [linkRelation, setLinkRelation] = useState(RELATION_TYPES[0].value);
   const [linkFilter, setLinkFilter] = useState("");
@@ -1595,6 +1626,7 @@ function EntryModal({ themes, entries, links, entry, onClose, onSave, onDelete, 
       refPages: ref.pages,
       refIsbn: ref.isbn,
       refDoi: ref.doi,
+      secondaryReference: secondaryReference.trim(),
     });
   };
 
@@ -1698,6 +1730,15 @@ function EntryModal({ themes, entries, links, entry, onClose, onSave, onDelete, 
             </div>
           )}
         </div>
+        <label className="syn-field">
+          <span>Référence secondaire</span>
+          <input
+            className="syn-input"
+            value={secondaryReference}
+            onChange={(e) => setSecondaryReference(e.target.value)}
+            placeholder="Une autre référence citée dans la principale, ou une précision de source"
+          />
+        </label>
         <label className="syn-field">
           <span>Annotations</span>
           <textarea className="syn-textarea" rows={5} value={notes} onChange={(e) => setNotes(e.target.value)} placeholder="Ce que vous retenez de la lecture : ce que dit l'auteur, le résumé de l'idée..." />
@@ -1823,7 +1864,12 @@ function ViewModal({ entry, allThemes, allEntries, links, onClose, onOpenEntry, 
           </div>
         )}
         <div className="syn-card-meta">Idée du {formatCapturedDate(entry.capturedAt)}</div>
-        {hasReference(entry) && <div className="syn-card-reference">{formatReference(entry)}</div>}
+        {(hasReference(entry) || hasSecondaryReference(entry)) && (
+          <div className="syn-card-reference-block">
+            {hasReference(entry) && <div className="syn-card-reference">{formatReference(entry)}</div>}
+            {hasSecondaryReference(entry) && <div className="syn-card-reference-secondary">↳ {entry.secondaryReference}</div>}
+          </div>
+        )}
         {entryLinks.length > 0 && (
           <div className="syn-card-links syn-view-links">
             <span className="syn-card-links-label">Fiches liées</span>
@@ -1988,6 +2034,8 @@ const css = `
 .syn-card-tags { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 10px; }
 .syn-card-meta { font-family: 'IBM Plex Mono', monospace; font-size: 11px; color: var(--encre-2); margin-top: 8px; }
 .syn-card-reference { font-size: 11.5px; color: var(--encre-2); font-style: italic; margin-bottom: 4px; }
+.syn-card-reference-secondary { font-size: 10.5px; color: var(--encre-3, #7a7a72); font-style: italic; margin-top: 2px; margin-bottom: 4px; opacity: 0.9; }
+.syn-card-reference-block { margin-bottom: 4px; }
 .syn-card-reference-clamp { display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; }
 .syn-card-links { margin-top: 10px; }
 .syn-card-links-label { display: block; font-family: 'IBM Plex Mono', monospace; font-size: 10.5px; text-transform: uppercase; letter-spacing: 0.06em; color: var(--encre-2); margin-bottom: 4px; }

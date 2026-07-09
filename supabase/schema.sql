@@ -33,6 +33,7 @@ create table if not exists entries (
   ref_pages text not null default '',
   ref_isbn text not null default '',
   ref_doi text not null default '',
+  secondary_reference text not null default '',
   deleted_at timestamptz,
   owner_id uuid not null,
   created_at timestamptz not null default now()
