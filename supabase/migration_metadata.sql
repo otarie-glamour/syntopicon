@@ -14,3 +14,4 @@ alter table entries add column if not exists ref_edition text not null default '
 alter table entries add column if not exists ref_pages text not null default '';
 alter table entries add column if not exists ref_isbn text not null default '';
 alter table entries add column if not exists ref_doi text not null default '';
+alter table entries add column if not exists secondary_reference text not null default '';

@@ -527,6 +527,8 @@ function Syntopicon() {
   const [dragOver, setDragOver] = useState(null);
   const [search, setSearch] = useState("");
   const [reflectionFilter, setReflectionFilter] = useState("all"); // all | with | without
+  const [viewMode, setViewMode] = useState("compact"); // compact | detailed
+  const [sortMode, setSortMode] = useState("recent"); // recent | captured | title
   const [showTrash, setShowTrash] = useState(false);
 
   /* ---------- authentification ---------- */
@@ -847,6 +849,29 @@ function Syntopicon() {
     URL.revokeObjectURL(url);
   };
 
+  const duplicateEntry = async (entry) => {
+    if (!entry) return;
+    const duplicate = {
+      title: `${entry.title}`.trim() ? `${entry.title} (copie)` : "Copie",
+      themeIds: [...(entry.themeIds || [])],
+      notes: entry.notes || "",
+      reflection: entry.reflection || "",
+      capturedAt: entry.capturedAt || todayStr(),
+      refType: entry.refType || "",
+      refAuthors: entry.refAuthors || "",
+      refTitle: entry.refTitle || "",
+      refContainer: entry.refContainer || "",
+      refPublisher: entry.refPublisher || "",
+      refYear: entry.refYear || "",
+      refEdition: entry.refEdition || "",
+      refPages: entry.refPages || "",
+      refIsbn: entry.refIsbn || "",
+      refDoi: entry.refDoi || "",
+      secondaryReference: entry.secondaryReference || "",
+    };
+    await addEntry(duplicate);
+  };
+
   /* ---------- dérivés ---------- */
   const linkCounts = useMemo(() => {
     const m = {};
@@ -887,20 +912,37 @@ function Syntopicon() {
     });
   }, [activeEntries, search, reflectionFilter]);
 
+  const sortedFiltered = useMemo(() => {
+    const copy = [...filtered];
+    if (sortMode === "title") {
+      copy.sort((a, b) => a.title.localeCompare(b.title, "fr", { sensitivity: "base" }));
+    } else if (sortMode === "captured") {
+      copy.sort((a, b) => (b.capturedAt || "").localeCompare(a.capturedAt || ""));
+    } else {
+      copy.sort((a, b) => (b.createdAt || 0) - (a.createdAt || 0));
+    }
+    return copy;
+  }, [filtered, sortMode]);
+
   const byTheme = useMemo(() => {
     const map = { none: [] };
     if (!data) return map;
     data.themes.forEach((t) => (map[t.id] = []));
-    filtered.forEach((e) => {
+    sortedFiltered.forEach((e) => {
       const ids = (e.themeIds || []).filter((tid) => map[tid]);
       if (ids.length) ids.forEach((tid) => map[tid].push(e));
       else map.none.push(e);
     });
     return map;
-  }, [data, filtered]);
+  }, [data, sortedFiltered]);
 
   const visibleThemes = data ? data.themes.filter((t) => byTheme[t.id]?.length > 0) : [];
   const hiddenThemes = data ? data.themes.filter((t) => !byTheme[t.id]?.length) : [];
+  const summaryStats = useMemo(() => ({
+    total: activeEntries.length,
+    withReflection: activeEntries.filter((e) => e.reflection.trim()).length,
+    withLinks: activeEntries.filter((e) => linkCounts[e.id] > 0).length,
+  }), [activeEntries, linkCounts]);
 
   /* Regroupe par auteur(s)+titre (la page est volontairement exclue : sinon chaque
      page d'un même livre compterait comme une provenance différente). */
@@ -953,6 +995,10 @@ function Syntopicon() {
 
   const editingEntry = editing ? activeEntries.find((e) => e.id === editing) : null;
   const viewingEntry = viewing ? activeEntries.find((e) => e.id === viewing) : null;
+  const resetFilters = () => {
+    setSearch("");
+    setReflectionFilter("all");
+  };
   const maxCount = Math.max(
     1,
     ...data.themes.map((t) => activeEntries.filter((e) => e.themeIds.includes(t.id)).length),
@@ -968,6 +1014,11 @@ function Syntopicon() {
         <div>
           <div className="syn-eyebrow">Catalogue personnel des idées</div>
           <h1 className="syn-title">Syntopicon</h1>
+          <div className="syn-stats-row">
+            <span className="syn-stat-pill">{summaryStats.total} fiches</span>
+            <span className="syn-stat-pill">{summaryStats.withReflection} avec réflexion</span>
+            <span className="syn-stat-pill">{summaryStats.withLinks} liées</span>
+          </div>
         </div>
         <div className="syn-header-right">
           <div className="syn-save" data-state={saveState}>
@@ -1002,6 +1053,7 @@ function Syntopicon() {
             Pressé ? Notez vos idées éparses ici
             {quickFlash && <span className="syn-flash">ajouté sans thème</span>}
           </div>
+          <div className="syn-hint">Ctrl/Cmd + Entrée pour capturer rapidement</div>
           <textarea
             className="syn-textarea"
             rows={3}
@@ -1029,121 +1081,149 @@ function Syntopicon() {
         </div>
       </section>
 
-      {/* ===== Kanban ===== */}
       <section className="syn-board-section">
         <div className="syn-section-head">
           <h2>Votre Syntopicon</h2>
           <span className="syn-sub">Consultez et annotez vos idées par thème</span>
-          <input
-            className="syn-search"
-            placeholder="Rechercher..."
-            value={search}
-            onChange={(e) => setSearch(e.target.value)}
-          />
-          <select
-            className="syn-search syn-reflection-filter"
-            value={reflectionFilter}
-            onChange={(e) => setReflectionFilter(e.target.value)}
-            title="Filtrer selon la présence d'une réflexion personnelle"
-          >
-            <option value="all">Toutes les fiches</option>
-            <option value="with">Avec réflexion</option>
-            <option value="without">Sans réflexion</option>
-          </select>
-        </div>
-
-        <div className="syn-board">
-          {visibleThemes.map((t) => (
-            <Column
-              key={t.id}
-              theme={t}
-              entries={byTheme[t.id]}
-              allThemes={data.themes}
-              allEntries={activeEntries}
-              links={data.links}
-              linkCounts={linkCounts}
-              unlimited={Boolean(search.trim())}
-              onOpen={setEditing}
-              onView={setViewing}
-              onRename={renameTheme}
-              onDelete={deleteTheme}
-              dragOver={dragOver === t.id}
-              onDragOver={(e) => { e.preventDefault(); setDragOver(t.id); }}
-              onDragLeave={() => setDragOver(null)}
-              onDrop={() => {
-                if (dragId) {
-                  const dragged = activeEntries.find((e) => e.id === dragId);
-                  if (dragged && !dragged.themeIds.includes(t.id)) {
-                    updateEntry(dragId, { themeIds: [...dragged.themeIds, t.id] });
-                  }
-                }
-                setDragId(null); setDragOver(null);
-              }}
-              onDragStart={setDragId}
+          <div className="syn-filter-row">
+            <div className="syn-view-toggle" role="tablist" aria-label="Mode d’affichage">
+              <button type="button" className={viewMode === "compact" ? "active" : ""} onClick={() => setViewMode("compact")}>Compact</button>
+              <button type="button" className={viewMode === "detailed" ? "active" : ""} onClick={() => setViewMode("detailed")}>Détaillé</button>
+            </div>
+            <select className="syn-search syn-sort-select" value={sortMode} onChange={(e) => setSortMode(e.target.value)} title="Trier les fiches">
+              <option value="recent">Plus récentes</option>
+              <option value="captured">Date de capture</option>
+              <option value="title">Titre</option>
+            </select>
+            <input
+              className="syn-search"
+              placeholder="Rechercher..."
+              value={search}
+              onChange={(e) => setSearch(e.target.value)}
             />
-          ))}
-
-          {byTheme.none.length > 0 && (
-            <Column
-              theme={{ id: "none", name: "Sans thème" }}
-              entries={byTheme.none}
-              allThemes={data.themes}
-              allEntries={activeEntries}
-              links={data.links}
-              linkCounts={linkCounts}
-              unlimited={Boolean(search.trim())}
-              onOpen={setEditing}
-              onView={setViewing}
-              muted
-              dragOver={dragOver === "none"}
-              onDragOver={(e) => { e.preventDefault(); setDragOver("none"); }}
-              onDragLeave={() => setDragOver(null)}
-              onDrop={() => {
-                if (dragId) updateEntry(dragId, { themeIds: [] });
-                setDragId(null); setDragOver(null);
-              }}
-              onDragStart={setDragId}
-            />
-          )}
-
-          {/* Groupes masqués */}
-          <div className="syn-hidden">
-            <div className="syn-hidden-title">Groupes masqués</div>
-            {hiddenThemes.length === 0 && (
-              <div className="syn-hidden-empty">Tous vos thèmes contiennent des entrées.</div>
-            )}
-            {hiddenThemes.map((t) => {
-              const tc = themeColor(t.id, data.themes);
-              return (
-                <div key={t.id} className="syn-hidden-row">
-                  <span className="syn-tag" style={{ background: tc.bg, color: tc.text }}>{t.name}</span>
-                  <span className="syn-count">0</span>
-                  <button className="syn-x" title="Supprimer ce thème" onClick={() => deleteTheme(t.id)}>×</button>
-                </div>
-              );
-            })}
-            {addingTheme ? (
-              <div className="syn-hidden-add">
-                <input
-                  autoFocus
-                  className="syn-input"
-                  placeholder="Nom du thème"
-                  value={newTheme}
-                  onChange={(e) => setNewTheme(e.target.value)}
-                  onKeyDown={(e) => {
-                    if (e.key === "Enter") { addTheme(newTheme); setNewTheme(""); setAddingTheme(false); }
-                    if (e.key === "Escape") { setNewTheme(""); setAddingTheme(false); }
-                  }}
-                />
-                <button className="syn-btn" onClick={() => { addTheme(newTheme); setNewTheme(""); setAddingTheme(false); }}>
-                  Ajouter
-                </button>
-              </div>
-            ) : (
-              <button className="syn-add-theme" onClick={() => setAddingTheme(true)}>+ Nouveau thème</button>
+            <select
+              className="syn-search syn-reflection-filter"
+              value={reflectionFilter}
+              onChange={(e) => setReflectionFilter(e.target.value)}
+              title="Filtrer selon la présence d'une réflexion personnelle"
+            >
+              <option value="all">Toutes les fiches</option>
+              <option value="with">Avec réflexion</option>
+              <option value="without">Sans réflexion</option>
+            </select>
+            {(search.trim() || reflectionFilter !== "all" || sortMode !== "recent" || viewMode !== "compact") && (
+              <button type="button" className="syn-btn syn-btn-sm" onClick={() => { resetFilters(); setSortMode("recent"); setViewMode("compact"); }}>
+                Réinitialiser
+              </button>
             )}
           </div>
+          <div className="syn-board-hint">Cliquer sur une carte pour la détailler, double-clic sur un thème pour le renommer.</div>
         </div>
+
+        {filtered.length === 0 ? (
+          <div className="syn-empty-board">
+            <div className="syn-empty-title">Aucune fiche ne correspond à ce filtre.</div>
+            <p className="syn-empty-text">Essayez un autre mot-clé ou réinitialisez les filtres pour retrouver vos idées.</p>
+            <button type="button" className="syn-btn syn-btn-primary" onClick={resetFilters}>
+              Voir toutes les fiches
+            </button>
+          </div>
+        ) : (
+          <div className="syn-board">
+            {visibleThemes.map((t) => (
+              <Column
+                key={t.id}
+                theme={t}
+                entries={byTheme[t.id]}
+                allThemes={data.themes}
+                allEntries={activeEntries}
+                links={data.links}
+                linkCounts={linkCounts}
+                unlimited={Boolean(search.trim())}
+                onOpen={setEditing}
+                onView={setViewing}
+                onRename={renameTheme}
+                onDelete={deleteTheme}
+                dragOver={dragOver === t.id}
+                onDragOver={(e) => { e.preventDefault(); setDragOver(t.id); }}
+                onDragLeave={() => setDragOver(null)}
+                onDrop={() => {
+                  if (dragId) {
+                    const dragged = activeEntries.find((e) => e.id === dragId);
+                    if (dragged && !dragged.themeIds.includes(t.id)) {
+                      updateEntry(dragId, { themeIds: [...dragged.themeIds, t.id] });
+                    }
+                  }
+                  setDragId(null); setDragOver(null);
+                }}
+                onDragStart={setDragId}
+                viewMode={viewMode}
+              />
+            ))}
+
+            {byTheme.none.length > 0 && (
+              <Column
+                theme={{ id: "none", name: "Sans thème" }}
+                entries={byTheme.none}
+                allThemes={data.themes}
+                allEntries={activeEntries}
+                links={data.links}
+                linkCounts={linkCounts}
+                unlimited={Boolean(search.trim())}
+                onOpen={setEditing}
+                onView={setViewing}
+                muted
+                dragOver={dragOver === "none"}
+                onDragOver={(e) => { e.preventDefault(); setDragOver("none"); }}
+                onDragLeave={() => setDragOver(null)}
+                onDrop={() => {
+                  if (dragId) updateEntry(dragId, { themeIds: [] });
+                  setDragId(null); setDragOver(null);
+                }}
+                onDragStart={setDragId}
+                viewMode={viewMode}
+              />
+            )}
+
+            {/* Groupes masqués */}
+            <div className="syn-hidden">
+              <div className="syn-hidden-title">Groupes masqués</div>
+              {hiddenThemes.length === 0 && (
+                <div className="syn-hidden-empty">Tous vos thèmes contiennent des entrées.</div>
+              )}
+              {hiddenThemes.map((t) => {
+                const tc = themeColor(t.id, data.themes);
+                return (
+                  <div key={t.id} className="syn-hidden-row">
+                    <span className="syn-tag" style={{ background: tc.bg, color: tc.text }}>{t.name}</span>
+                    <span className="syn-count">0</span>
+                    <button className="syn-x" title="Supprimer ce thème" onClick={() => deleteTheme(t.id)}>×</button>
+                  </div>
+                );
+              })}
+              {addingTheme ? (
+                <div className="syn-hidden-add">
+                  <input
+                    autoFocus
+                    className="syn-input"
+                    placeholder="Nom du thème"
+                    value={newTheme}
+                    onChange={(e) => setNewTheme(e.target.value)}
+                    onKeyDown={(e) => {
+                      if (e.key === "Enter") { addTheme(newTheme); setNewTheme(""); setAddingTheme(false); }
+                      if (e.key === "Escape") { setNewTheme(""); setAddingTheme(false); }
+                    }}
+                  />
+                  <button className="syn-btn" onClick={() => { addTheme(newTheme); setNewTheme(""); setAddingTheme(false); }}>
+                    Ajouter
+                  </button>
+                </div>
+              ) : (
+                <button className="syn-add-theme" onClick={() => setAddingTheme(true)}>+ Nouveau thème</button>
+              )}
+            </div>
+          </div>
+        )}
       </section>
 
       {/* ===== Suggestions de liens ===== */}
@@ -1254,6 +1334,7 @@ function Syntopicon() {
           onClose={() => setViewing(null)}
           onOpenEntry={setViewing}
           onEdit={() => { setViewing(null); setEditing(viewingEntry.id); }}
+          onDuplicate={() => { duplicateEntry(viewingEntry); setViewing(null); }}
         />
       )}
       {showTrash && (
@@ -1271,7 +1352,7 @@ function Syntopicon() {
 /* ---------- Colonne Kanban ---------- */
 const COLUMN_PAGE_SIZE = 20;
 
-function Column({ theme, entries, allThemes, allEntries, links, linkCounts, unlimited, onOpen, onView, onRename, onDelete, muted, dragOver, onDragOver, onDragLeave, onDrop, onDragStart }) {
+function Column({ theme, entries, allThemes, allEntries, links, linkCounts, unlimited, onOpen, onView, onRename, onDelete, muted, dragOver, onDragOver, onDragLeave, onDrop, onDragStart, viewMode }) {
   const [renaming, setRenaming] = useState(false);
   const [name, setName] = useState(theme.name);
   const [visibleCount, setVisibleCount] = useState(COLUMN_PAGE_SIZE);
@@ -1319,14 +1400,15 @@ function Column({ theme, entries, allThemes, allEntries, links, linkCounts, unli
       </div>
       {visibleEntries.map((e) => {
         const expanded = expandedId === e.id;
-        const entryThemeTags = expanded
+        const showDetails = viewMode === "detailed" || expanded;
+        const entryThemeTags = showDetails
           ? e.themeIds.map((tid) => allThemes.find((t) => t.id === tid)).filter(Boolean)
           : [];
-        const entryCardLinks = expanded ? resolveEntryLinks(e.id, links, allEntries) : [];
+        const entryCardLinks = showDetails ? resolveEntryLinks(e.id, links, allEntries) : [];
         return (
           <div
             key={e.id}
-            className={"syn-card" + (expanded ? " syn-card-expanded" : "")}
+            className={"syn-card" + (showDetails ? " syn-card-expanded" : "")}
             draggable
             onDragStart={() => onDragStart(e.id)}
             onClick={() => toggleExpand(e.id)}
@@ -1361,7 +1443,7 @@ function Column({ theme, entries, allThemes, allEntries, links, linkCounts, unli
                 <p className="syn-reflection-text">{e.reflection}</p>
               </div>
             )}
-            {expanded && (
+            {showDetails && (
               <>
                 {entryThemeTags.length > 0 && (
                   <div className="syn-card-tags">
@@ -1835,7 +1917,7 @@ function EntryModal({ themes, entries, links, entry, onClose, onSave, onDelete, 
 }
 
 /* ---------- Visualisation (lecture seule) ---------- */
-function ViewModal({ entry, allThemes, allEntries, links, onClose, onOpenEntry, onEdit }) {
+function ViewModal({ entry, allThemes, allEntries, links, onClose, onOpenEntry, onEdit, onDuplicate }) {
   const themeTags = entry.themeIds.map((tid) => allThemes.find((t) => t.id === tid)).filter(Boolean);
   const entryLinks = resolveEntryLinks(entry.id, links, allEntries);
 
@@ -1890,6 +1972,7 @@ function ViewModal({ entry, allThemes, allEntries, links, onClose, onOpenEntry, 
         )}
         <div className="syn-modal-actions">
           <div className="syn-spacer" />
+          <button className="syn-btn syn-btn-sm" onClick={onDuplicate}>Dupliquer</button>
           <button className="syn-btn" onClick={onClose}>Fermer</button>
           <button className="syn-btn syn-btn-primary" onClick={onEdit}>Modifier</button>
         </div>
@@ -1966,7 +2049,9 @@ const css = `
 /* ----- en-tête ----- */
 .syn-header { display: flex; align-items: flex-end; justify-content: space-between; gap: 16px; margin-bottom: 28px; }
 .syn-header-right { display: flex; flex-direction: column; align-items: flex-end; gap: 8px; }
-.syn-header-actions { display: flex; gap: 8px; }
+.syn-header-actions { display: flex; gap: 8px; flex-wrap: wrap; justify-content: flex-end; }
+.syn-stats-row { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 10px; }
+.syn-stat-pill { display: inline-flex; align-items: center; gap: 6px; padding: 5px 10px; border-radius: 999px; background: var(--vert-clair); color: var(--vert); font-size: 12px; font-weight: 600; }
 .syn-eyebrow { font-family: 'IBM Plex Mono', monospace; font-size: 11px; letter-spacing: 0.14em; text-transform: uppercase; color: var(--vert); margin-bottom: 4px; }
 .syn-title { font-family: 'Cormorant Garamond', serif; font-weight: 600; font-size: clamp(32px, 5vw, 44px); line-height: 1; margin: 0; }
 .syn-save { font-family: 'IBM Plex Mono', monospace; font-size: 11px; color: var(--encre-2); min-height: 16px; }
@@ -1976,7 +2061,8 @@ const css = `
 .syn-capture-row { display: grid; grid-template-columns: minmax(200px, 0.9fr) minmax(220px, 1fr) minmax(240px, 1.1fr); gap: 16px; margin-bottom: 40px; }
 @media (max-width: 900px) { .syn-capture-row { grid-template-columns: 1fr 1fr; } }
 @media (max-width: 600px) { .syn-capture-row { grid-template-columns: 1fr; } }
-.syn-panel { background: var(--fiche); border: 1px solid var(--ligne); border-radius: 6px; padding: 18px; display: flex; flex-direction: column; gap: 12px; align-items: flex-start; }
+.syn-panel { background: var(--fiche); border: 1px solid var(--ligne); border-radius: 6px; padding: 18px; display: flex; flex-direction: column; gap: 12px; align-items: flex-start; box-shadow: 0 1px 2px rgba(34,48,63,0.04); transition: transform 0.12s, box-shadow 0.12s, border-color 0.12s; }
+.syn-panel:hover { transform: translateY(-1px); box-shadow: 0 3px 10px rgba(34,48,63,0.08); border-color: var(--vert); }
 .syn-panel-label { font-weight: 600; font-size: 14px; display: flex; gap: 10px; align-items: baseline; }
 .syn-flash { font-family: 'IBM Plex Mono', monospace; font-size: 11px; color: var(--vert); font-weight: 400; }
 .syn-quick .syn-textarea { width: 100%; }
@@ -1990,9 +2076,18 @@ const css = `
 .syn-section-head { display: flex; align-items: baseline; gap: 14px; flex-wrap: wrap; border-bottom: 1px solid var(--encre); padding-bottom: 10px; margin-bottom: 20px; }
 .syn-section-head h2 { font-family: 'Cormorant Garamond', serif; font-weight: 600; font-size: 26px; margin: 0; }
 .syn-sub { color: var(--encre-2); font-size: 13px; }
-.syn-search { margin-left: auto; border: 1px solid var(--ligne); border-radius: 4px; padding: 6px 10px; font: inherit; background: var(--fiche); min-width: 180px; }
+.syn-filter-row { display: flex; align-items: center; gap: 8px; margin-left: auto; flex-wrap: wrap; }
+.syn-board-hint { width: 100%; font-size: 12px; color: var(--encre-2); margin-top: 6px; }
+.syn-view-toggle { display: inline-flex; gap: 4px; padding: 2px; border: 1px solid var(--ligne); border-radius: 999px; background: var(--fiche); }
+.syn-view-toggle button { border: none; background: none; color: var(--encre-2); font: inherit; font-size: 12px; padding: 5px 10px; border-radius: 999px; cursor: pointer; }
+.syn-view-toggle button.active { background: var(--vert); color: white; }
+.syn-search { border: 1px solid var(--ligne); border-radius: 4px; padding: 6px 10px; font: inherit; background: var(--fiche); min-width: 180px; }
 .syn-search:focus { outline: 2px solid var(--vert); outline-offset: 1px; }
 .syn-reflection-filter { margin-left: 0; min-width: 0; cursor: pointer; }
+.syn-sort-select { min-width: 140px; cursor: pointer; }
+.syn-hint { font-size: 12px; color: var(--encre-2); margin-top: -2px; }
+.syn-empty-board { background: var(--fiche); border: 1px dashed var(--ligne); border-radius: 6px; padding: 22px; text-align: center; }
+.syn-empty-title { font-weight: 600; margin-bottom: 6px; }
 
 /* ----- kanban ----- */
 .syn-board-section { margin-bottom: 48px; }
@@ -2021,7 +2116,7 @@ const css = `
 .syn-card { background: var(--fiche); border: 1px solid var(--ligne); border-radius: 4px; padding: 12px 14px 10px; margin-bottom: 10px; cursor: pointer; box-shadow: 0 1px 2px rgba(34,48,63,0.06); transition: transform 0.12s, box-shadow 0.12s; }
 .syn-card:hover { transform: translateY(-1px); box-shadow: 0 3px 8px rgba(34,48,63,0.10); }
 .syn-card-expanded, .syn-card-expanded:hover { border-color: var(--vert); }
-.syn-card-title { font-weight: 500; padding-bottom: 7px; border-bottom: 1px solid var(--filet); margin-bottom: 7px; display: flex; align-items: baseline; justify-content: space-between; gap: 8px; }
+.syn-card-title { font-weight: 500; padding-bottom: 7px; border-bottom: 1px solid var(--filet); margin-bottom: 7px; display: flex; align-items: baseline; justify-content: space-between; gap: 8px; line-height: 1.35; word-break: break-word; }
 .syn-card-badges { display: flex; align-items: center; gap: 6px; flex-shrink: 0; }
 .syn-card-linkcount { font-family: 'IBM Plex Mono', monospace; font-size: 10.5px; color: var(--encre-2); font-weight: 400; white-space: nowrap; }
 .syn-card-reflectioncount { font-size: 12px; }
@@ -2029,7 +2124,7 @@ const css = `
 .syn-reflection-label { display: block; font-family: 'IBM Plex Mono', monospace; font-size: 10.5px; font-weight: 600; text-transform: uppercase; letter-spacing: 0.06em; color: var(--reflexion); margin-bottom: 4px; }
 .syn-reflection-text { font-size: 13px; color: var(--encre); white-space: pre-wrap; margin: 0; line-height: 1.5; }
 .syn-card-reflection-box { margin-top: 10px; }
-.syn-card-notes { font-size: 12.5px; color: var(--encre-2); display: -webkit-box; -webkit-line-clamp: 3; -webkit-box-orient: vertical; overflow: hidden; }
+.syn-card-notes { font-size: 12.5px; color: var(--encre-2); display: -webkit-box; -webkit-line-clamp: 3; -webkit-box-orient: vertical; overflow: hidden; line-height: 1.45; }
 .syn-card-notes-full { display: block; -webkit-line-clamp: unset; white-space: pre-wrap; }
 .syn-card-tags { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 10px; }
 .syn-card-meta { font-family: 'IBM Plex Mono', monospace; font-size: 11px; color: var(--encre-2); margin-top: 8px; }
